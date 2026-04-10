@@ -1,5 +1,6 @@
-import { supabase } from "@/lib/supabase";
-import { revalidatePath } from "next/cache";
+import Link from "next/link";
+import { createClient } from "@supabase/supabase-js";
+import { notFound } from "next/navigation";
 
 type PageProps = {
   params: Promise<{ id: string }>;
@@ -8,60 +9,84 @@ type PageProps = {
 export default async function OrderDetailPage({ params }: PageProps) {
   const { id } = await params;
 
-  async function approveOrder() {
-    "use server";
+  const supabaseAdmin = createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!
+  );
 
-    await supabase
-      .from("order_items")
-      .update({ status: "Approved" })
-      .eq("id", id);
-
-    revalidatePath("/");
-    revalidatePath(`/orders/${id}`);
-  }
-
-  const { data, error } = await supabase
+  const { data: order, error } = await supabaseAdmin
     .from("order_items")
     .select("*")
     .eq("id", id)
     .single();
 
-  if (error || !data) {
-    return (
-      <div className="p-10">
-        <h1 className="text-2xl font-bold">Order Not Found</h1>
-      </div>
-    );
+  if (error || !order) {
+    return notFound();
   }
 
   return (
-    <div className="p-10 space-y-4">
-      <h1 className="text-3xl font-bold">Order Detail</h1>
+    <div className="p-10 space-y-8">
+      <div className="flex items-center justify-between">
+        <h1 className="text-3xl font-bold">Order Detail</h1>
+        <div className="flex gap-3">
+          <Link href="/orders" className="px-4 py-2 border rounded">
+            Back to Orders
+          </Link>
+        </div>
+      </div>
 
-      <div><strong>Action:</strong> {data.action}</div>
-      <div><strong>Customer:</strong> {data.customer}</div>
-      <div><strong>PO Number:</strong> {data.po_number || ""}</div>
-      <div><strong>SKU:</strong> {data.sku}</div>
-      <div><strong>Quantity:</strong> {data.quantity ?? ""}</div>
-      <div><strong>Deadline:</strong> {data.deadline || ""}</div>
-      <div><strong>Notes:</strong> {data.notes || ""}</div>
-      <div><strong>Source Email:</strong> {data.source_email || ""}</div>
-      <div><strong>Status:</strong> {data.status}</div>
+      <div className="border rounded bg-white p-6 space-y-3">
+        <div>
+          <strong>Action:</strong> {order.action || ""}
+        </div>
+        <div>
+          <strong>Customer:</strong> {order.customer || ""}
+        </div>
+        <div>
+          <strong>PO Number:</strong> {order.po_number || ""}
+        </div>
+        <div>
+          <strong>SKU:</strong> {order.sku || ""}
+        </div>
+        <div>
+          <strong>Quantity:</strong> {order.quantity ?? ""}
+        </div>
+        <div>
+          <strong>Notes:</strong> {order.notes || ""}
+        </div>
+        <div>
+          <strong>Status:</strong> {order.status || ""}
+        </div>
+        <div>
+          <strong>Source Email Subject:</strong> {order.email_subject || ""}
+        </div>
+        <div>
+          <strong>Gmail Message ID:</strong> {order.gmail_message_id || ""}
+        </div>
+      </div>
 
-      {/* APPROVE BUTTON */}
-      <form action={approveOrder}>
-        <button className="mt-6 px-4 py-2 bg-green-600 text-white rounded">
-          Approve Order
-        </button>
-      </form>
+      <div className="flex gap-3">
+        <form action="/api/orders/approve" method="POST">
+          <input type="hidden" name="order_id" value={order.id} />
+          <button className="px-4 py-2 bg-green-600 text-white rounded">
+            Approve
+          </button>
+        </form>
 
-      {/* EDIT BUTTON */}
-      <a
-        href={`/orders/${data.id}/edit`}
-        className="inline-block mt-4 px-4 py-2 bg-gray-800 text-white rounded"
-      >
-        Edit Order
-      </a>
+        <form action="/api/orders/done" method="POST">
+          <input type="hidden" name="order_id" value={order.id} />
+          <button className="px-4 py-2 bg-blue-600 text-white rounded">
+            Mark Done
+          </button>
+        </form>
+
+        <Link
+          href={`/orders/${order.id}/edit`}
+          className="px-4 py-2 bg-gray-800 text-white rounded"
+        >
+          Edit
+        </Link>
+      </div>
     </div>
   );
 }
