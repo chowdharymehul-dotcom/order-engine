@@ -8,7 +8,6 @@ const openai = new OpenAI({
 
 export async function GET(req: NextRequest) {
   try {
-    // 🔐 Optional auth for cron
     const authHeader = req.headers.get("authorization");
     const expected = `Bearer ${process.env.CRON_SECRET}`;
 
@@ -16,13 +15,11 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    // ✅ Supabase client (FIXED ISSUE HERE)
     const supabaseAdmin = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
       process.env.SUPABASE_SERVICE_ROLE_KEY!
     );
 
-    // 🔹 Get latest Gmail connection
     const { data: connection } = await supabaseAdmin
       .from("inbox_connections")
       .select("*")
@@ -37,7 +34,6 @@ export async function GET(req: NextRequest) {
 
     const accessToken = connection.access_token;
 
-    // 🔹 Fetch emails from Gmail
     const gmailRes = await fetch(
       "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=5",
       {
@@ -54,15 +50,14 @@ export async function GET(req: NextRequest) {
     }
 
     let processed = 0;
-    let results: any[] = [];
-    let skipped: any[] = [];
-    let needsOcr: any[] = [];
-    let debug: any[] = [];
+    const results: any[] = [];
+    const skipped: any[] = [];
+    const needsOcr: any[] = [];
+    const debug: any[] = [];
 
     for (const msg of gmailData.messages) {
       const messageId = msg.id;
 
-      // 🔹 Check if already saved
       const { data: existing } = await supabaseAdmin
         .from("emails")
         .select("id")
@@ -77,7 +72,6 @@ export async function GET(req: NextRequest) {
         continue;
       }
 
-      // 🔹 Get full message
       const msgRes = await fetch(
         `https://gmail.googleapis.com/gmail/v1/users/me/messages/${messageId}`,
         {
@@ -88,8 +82,7 @@ export async function GET(req: NextRequest) {
       );
 
       const msgData = await msgRes.json();
-
-      const headers = msgData.payload.headers;
+      const headers = msgData.payload?.headers || [];
 
       const subject =
         headers.find((h: any) => h.name === "Subject")?.value || "";
@@ -97,26 +90,22 @@ export async function GET(req: NextRequest) {
         headers.find((h: any) => h.name === "From")?.value || "";
 
       let body = "";
-      let attachmentText = "";
       let hasPdfAttachment = false;
-      let attachmentNames: string[] = [];
+      const attachmentNames: string[] = [];
 
-      // 🔹 Extract body
-      const parts = msgData.payload.parts || [];
+      const parts = msgData.payload?.parts || [];
 
       for (const part of parts) {
         if (part.mimeType === "text/plain" && part.body?.data) {
           body = Buffer.from(part.body.data, "base64").toString("utf-8");
         }
 
-        // 🔹 Detect PDF attachments
         if (part.filename && part.filename.toLowerCase().includes(".pdf")) {
           hasPdfAttachment = true;
           attachmentNames.push(part.filename);
         }
       }
 
-      // 🔹 If PDF exists → needs OCR
       if (hasPdfAttachment) {
         await supabaseAdmin.from("emails").insert({
           gmail_message_id: messageId,
@@ -145,7 +134,6 @@ export async function GET(req: NextRequest) {
         continue;
       }
 
-      // 🔹 AI extraction (no attachment)
       const combinedInput = `
 Subject: ${subject}
 From: ${from}
@@ -181,7 +169,7 @@ Rules:
 - Extract multiple SKUs as separate items
 - Valid actions: Place Order, Reply to Enquiry, Follow Up, Cancel Order, Confirm Delivery
 - NEVER create item with empty SKU
-- If no actionable content → return empty items
+- If no actionable content, return empty items.
 `,
           },
           {
@@ -200,7 +188,6 @@ Rules:
         parsed = { customer: "", po_number: "", items: [] };
       }
 
-      // 🔹 Save email
       await supabaseAdmin.from("emails").insert({
         gmail_message_id: messageId,
         subject,
@@ -211,7 +198,6 @@ Rules:
         received_at: new Date().toISOString(),
       });
 
-      // 🔹 Save order items
       for (const item of parsed.items || []) {
         if (!item.sku) continue;
 
@@ -247,8 +233,11 @@ Rules:
       debug,
     });
   } catch (error: any) {
-    return NextResponse.json({
-      error: error.message,
-    });
+    return NextResponse.json(
+      {
+        error: error.message,
+      },
+      { status: 500 }
+    );
   }
 }
