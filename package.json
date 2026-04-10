@@ -9,8 +9,6 @@
     "lint": "eslint"
   },
   "dependencies": {
-    "@napi-rs/canvas": "^0.1.97",
-    "@napi-rs/canvas-darwin-arm64": "^0.1.97",
     "@supabase/supabase-js": "^2.101.1",
     "google-auth-library": "^10.6.2",
     "googleapis": "^171.4.0",
