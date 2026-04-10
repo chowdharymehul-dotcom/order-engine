@@ -1,13 +1,18 @@
-import { supabase } from "@/lib/supabase";
+import { createClient } from "@supabase/supabase-js";
 import OpenAI from "openai";
-
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY!,
-});
 
 export default function ProcessPage() {
   async function processEmail(formData: FormData) {
     "use server";
+
+    const openai = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY!,
+    });
+
+    const supabaseAdmin = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.SUPABASE_SERVICE_ROLE_KEY!
+    );
 
     const email = formData.get("email") as string;
     const attachment = formData.get("attachment") as string;
@@ -24,7 +29,7 @@ Extract ALL actionable items from EMAIL + ATTACHMENT.
 CRITICAL RULES:
 - Each SKU must be a separate item
 - Do NOT merge multiple SKUs into one item
-- If multiple SKUs exist → create multiple items
+- If multiple SKUs exist, create multiple items
 - Use attachment for SKU + quantity
 - Use email for instructions (reply, follow up, etc.)
 
@@ -49,7 +54,7 @@ RETURN ONLY JSON:
     }
   ]
 }
-          `,
+`,
         },
         {
           role: "user",
@@ -60,27 +65,25 @@ RETURN ONLY JSON:
 
     const text = response.choices[0].message.content || "{}";
 
-    let parsed;
+    let parsed: any;
     try {
       parsed = JSON.parse(text);
-    } catch (err) {
-      console.error("JSON parse error:", text);
+    } catch {
       return;
     }
 
     if (!parsed.items || !Array.isArray(parsed.items)) {
-      console.error("Invalid AI response:", parsed);
       return;
     }
 
     for (const item of parsed.items) {
-      await supabase.from("order_items").insert({
+      await supabaseAdmin.from("order_items").insert({
         action: item.action,
-        customer: parsed.customer,
-        po_number: parsed.po_number,
+        customer: parsed.customer || "",
+        po_number: parsed.po_number || "",
         sku: item.sku,
-        quantity: item.quantity,
-        notes: item.notes,
+        quantity: item.quantity || null,
+        notes: item.notes || "",
         status: "New",
       });
     }
@@ -91,7 +94,6 @@ RETURN ONLY JSON:
       <h1 className="text-2xl font-bold">Process Email</h1>
 
       <form action={processEmail} className="space-y-4">
-
         <textarea
           name="email"
           placeholder="Paste email here"
@@ -107,7 +109,6 @@ RETURN ONLY JSON:
         <button className="bg-blue-600 text-white px-4 py-2 rounded">
           Process
         </button>
-
       </form>
     </div>
   );
