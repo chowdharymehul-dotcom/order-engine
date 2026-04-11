@@ -21,16 +21,26 @@ export async function GET(req: NextRequest) {
       apiKey: process.env.OPENAI_API_KEY!,
     });
 
-    // 🔽 Get Gmail connection
-    const { data: connection } = await supabaseAdmin
+    // ✅ FIXED Gmail connection logic
+    const { data: connections, error: connectionError } = await supabaseAdmin
       .from("inbox_connections")
       .select("*")
       .eq("provider", "gmail")
-      .single();
+      .order("created_at", { ascending: false })
+      .limit(1);
+
+    console.log("📦 Gmail connection query result:", connections);
+    console.log("📦 Gmail connection query error:", connectionError);
+
+    const connection = connections?.[0];
 
     if (!connection) {
       console.error("❌ No Gmail connection found");
-      return NextResponse.json({ error: "No Gmail connection" });
+      return NextResponse.json({
+        error: "No Gmail connection",
+        queryError: connectionError?.message || null,
+        foundRows: connections?.length || 0,
+      });
     }
 
     const accessToken = connection.access_token;
@@ -91,7 +101,7 @@ export async function GET(req: NextRequest) {
         .from("emails")
         .select("id")
         .eq("gmail_message_id", msgId)
-        .single();
+        .maybeSingle();
 
       if (existing) {
         skipped.push(msgId);
@@ -115,7 +125,7 @@ export async function GET(req: NextRequest) {
 
       if (!emailRecord) continue;
 
-      // 🔽 Simple OCR detection (if body empty)
+      // 🔽 OCR detection
       if (!body || body.length < 20) {
         await supabaseAdmin
           .from("emails")
