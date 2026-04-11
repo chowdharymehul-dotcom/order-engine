@@ -3,6 +3,7 @@ export const revalidate = 0;
 
 import Link from "next/link";
 import { createClient } from "@supabase/supabase-js";
+import AutoRefresh from "@/components/AutoRefresh";
 
 type OrderItem = {
   id: string;
@@ -105,6 +106,8 @@ export default async function OrdersPage({ searchParams }: OrdersPageProps) {
 
   return (
     <div className="p-10 space-y-8">
+      <AutoRefresh interval={10000} />
+
       <div className="flex items-center justify-between">
         <h1 className="text-3xl font-bold">Orders Dashboard</h1>
         <div className="flex gap-3">
