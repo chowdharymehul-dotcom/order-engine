@@ -3,6 +3,7 @@ export const revalidate = 0;
 
 import Link from "next/link";
 import DashboardCards from "@/components/DashboardCards";
+import RecentActivity from "@/components/RecentActivity";
 
 export default function HomePage() {
   return (
@@ -11,30 +12,36 @@ export default function HomePage() {
 
       <DashboardCards />
 
-      <div className="bg-white border rounded p-6 space-y-4">
-        <h2 className="text-xl font-semibold">Quick Actions</h2>
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-8">
+        <div className="xl:col-span-2">
+          <RecentActivity />
+        </div>
 
-        <div className="flex flex-wrap gap-4">
-          <Link
-            href="/emails"
-            className="px-6 py-3 border rounded hover:bg-gray-100"
-          >
-            View Emails
-          </Link>
+        <div className="bg-white border rounded p-6 space-y-4">
+          <h2 className="text-xl font-semibold">Quick Actions</h2>
 
-          <Link
-            href="/orders"
-            className="px-6 py-3 border rounded hover:bg-gray-100"
-          >
-            View Orders
-          </Link>
+          <div className="flex flex-col gap-3">
+            <Link
+              href="/emails"
+              className="px-4 py-3 border rounded hover:bg-gray-100"
+            >
+              View Emails
+            </Link>
 
-          <Link
-            href="/needs-ocr"
-            className="px-6 py-3 border rounded hover:bg-gray-100"
-          >
-            Needs OCR Queue
-          </Link>
+            <Link
+              href="/orders"
+              className="px-4 py-3 border rounded hover:bg-gray-100"
+            >
+              View Orders
+            </Link>
+
+            <Link
+              href="/needs-ocr"
+              className="px-4 py-3 border rounded hover:bg-gray-100"
+            >
+              Needs OCR Queue
+            </Link>
+          </div>
         </div>
       </div>
     </div>
