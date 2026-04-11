@@ -15,7 +15,7 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const baseUrl = req.nextUrl.origin;
+    const baseUrl = process.env.NEXT_PUBLIC_SITE_URL!;
 
     const response = await fetch(`${baseUrl}/api/process-emails`, {
       method: "GET",
