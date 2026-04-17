@@ -44,9 +44,9 @@ export async function GET(req: NextRequest) {
 
     const accessToken = connection.access_token;
 
-    // ✅ Increased fetch window so cron does not miss new emails
+    // ✅ Inbox-only + recent emails so cron does not miss fresh mails
     const gmailRes = await fetch(
-      "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=20&q=newer_than:2d",
+      "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=20&q=in:inbox newer_than:1d",
       {
         headers: {
           Authorization: `Bearer ${accessToken}`,
@@ -56,6 +56,9 @@ export async function GET(req: NextRequest) {
     );
 
     const gmailData = await gmailRes.json();
+
+    console.log("📩 Gmail raw response:", gmailData);
+
     const messages = gmailData.messages || [];
 
     console.log("📩 Gmail messages found:", messages.length);
