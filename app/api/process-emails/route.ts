@@ -21,7 +21,6 @@ export async function GET(req: NextRequest) {
       apiKey: process.env.OPENAI_API_KEY!,
     });
 
-    // ✅ FIXED Gmail connection logic
     const { data: connections, error: connectionError } = await supabaseAdmin
       .from("inbox_connections")
       .select("*")
@@ -45,13 +44,14 @@ export async function GET(req: NextRequest) {
 
     const accessToken = connection.access_token;
 
-    // 🔽 Fetch emails from Gmail
+    // ✅ Increased fetch window so cron does not miss new emails
     const gmailRes = await fetch(
-      "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=5",
+      "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=20&q=newer_than:2d",
       {
         headers: {
           Authorization: `Bearer ${accessToken}`,
         },
+        cache: "no-store",
       }
     );
 
@@ -59,6 +59,10 @@ export async function GET(req: NextRequest) {
     const messages = gmailData.messages || [];
 
     console.log("📩 Gmail messages found:", messages.length);
+    console.log(
+      "📩 Gmail message IDs:",
+      messages.map((m: any) => m.id)
+    );
 
     let processedResults: any[] = [];
     let needsOcr: any[] = [];
@@ -67,49 +71,61 @@ export async function GET(req: NextRequest) {
     for (const msg of messages) {
       const msgId = msg.id;
 
-      // 🔽 Get full email
       const msgRes = await fetch(
         `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msgId}`,
         {
           headers: {
             Authorization: `Bearer ${accessToken}`,
           },
+          cache: "no-store",
         }
       );
 
       const msgData = await msgRes.json();
 
-      const headers = msgData.payload.headers;
+      if (!msgData.payload) {
+        console.log("⚠️ No payload found for message:", msgId);
+        continue;
+      }
+
+      const headers = msgData.payload.headers || [];
 
       const subject =
         headers.find((h: any) => h.name === "Subject")?.value || "";
       const from =
         headers.find((h: any) => h.name === "From")?.value || "";
 
+      console.log("✉️ Processing subject:", subject);
+
       let body = "";
 
-      if (msgData.payload.parts) {
+      if (msgData.payload.parts && Array.isArray(msgData.payload.parts)) {
         for (const part of msgData.payload.parts) {
           if (part.mimeType === "text/plain" && part.body?.data) {
             body = Buffer.from(part.body.data, "base64").toString("utf-8");
+            break;
           }
         }
       }
 
-      // 🔽 Check if already exists
+      if (!body && msgData.payload.body?.data) {
+        body = Buffer.from(msgData.payload.body.data, "base64").toString("utf-8");
+      }
+
       const { data: existing } = await supabaseAdmin
         .from("emails")
         .select("id")
         .eq("gmail_message_id", msgId)
         .maybeSingle();
 
+      console.log("🔎 Existing email check for:", msgId, !!existing);
+
       if (existing) {
         skipped.push(msgId);
         continue;
       }
 
-      // 🔽 Insert email
-      const { data: emailRecord } = await supabaseAdmin
+      const { data: emailRecord, error: emailInsertError } = await supabaseAdmin
         .from("emails")
         .insert([
           {
@@ -117,16 +133,21 @@ export async function GET(req: NextRequest) {
             subject,
             from_email: from,
             body_text: body,
+            attachment_text: "",
             processing_status: "pending",
+            received_at: new Date().toISOString(),
           },
         ])
         .select()
         .single();
 
-      if (!emailRecord) continue;
+      if (emailInsertError || !emailRecord) {
+        console.error("❌ Failed to insert email:", emailInsertError?.message);
+        continue;
+      }
 
-      // 🔽 OCR detection
-      if (!body || body.length < 20) {
+      // Very simple OCR flag for low-text emails
+      if (!body || body.trim().length < 20) {
         await supabaseAdmin
           .from("emails")
           .update({ processing_status: "needs_ocr" })
@@ -136,15 +157,21 @@ export async function GET(req: NextRequest) {
         continue;
       }
 
-      // 🔽 Send to OpenAI
       const prompt = `
-Extract structured actions from this email.
+Extract structured business actions from this email.
 
 Email:
 ${body}
 
-Return format:
-Action,Customer,PO Number,SKU,Quantity,Deadline
+Return ONLY simple structured text. Identify:
+- Action
+- Customer
+- PO Number
+- SKU
+- Quantity
+- Deadline
+
+If multiple SKUs exist, list all of them clearly.
 `;
 
       const completion = await openai.chat.completions.create({
@@ -152,12 +179,11 @@ Action,Customer,PO Number,SKU,Quantity,Deadline
         messages: [{ role: "user", content: prompt }],
       });
 
-      const output =
-        completion.choices[0]?.message?.content || "";
+      const output = completion.choices[0]?.message?.content || "";
 
       console.log("🤖 AI output:", output);
 
-      // 🔽 Insert order
+      // Current simplified insert logic
       await supabaseAdmin.from("order_items").insert([
         {
           action: "Place Order",
@@ -188,6 +214,9 @@ Action,Customer,PO Number,SKU,Quantity,Deadline
       processed: processedResults.length,
       needsOcr: needsOcr.length,
       skipped: skipped.length,
+      processedIds: processedResults,
+      needsOcrIds: needsOcr,
+      skippedIds: skipped,
     });
   } catch (error: any) {
     console.error("❌ ERROR:", error.message);
