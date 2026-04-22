@@ -139,8 +139,13 @@ async function uploadFile(
     formData.append(key, String(value));
   }
 
-  const blob = new Blob([buffer], { type: "application/pdf" });
-  formData.append("file", blob, filename);
+  const uint8 = new Uint8Array(
+    buffer.buffer,
+    buffer.byteOffset,
+    buffer.byteLength
+  );
+  const fileBlob = new Blob([uint8], { type: "application/pdf" });
+  formData.append("file", fileBlob, filename);
 
   const res = await fetch(form.url, {
     method: "POST",
@@ -371,7 +376,8 @@ export async function extractTextFromPdfWithCloudConvert(
   throw new Error(
     JSON.stringify({
       step: "extract_text_from_pdf_with_cloudconvert",
-      error: "Both direct conversion and OCR fallback returned empty/too-short text",
+      error:
+        "Both direct conversion and OCR fallback returned empty/too-short text",
       directJobId: direct.jobId,
       ocrJobId: ocr.jobId,
       directTextLength: directText.length,
