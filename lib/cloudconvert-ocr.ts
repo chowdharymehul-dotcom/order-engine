@@ -79,6 +79,13 @@ function buildTaskFailureError(job: CloudConvertJob) {
   );
 }
 
+function toExactArrayBuffer(buffer: Buffer): ArrayBuffer {
+  return buffer.buffer.slice(
+    buffer.byteOffset,
+    buffer.byteOffset + buffer.byteLength
+  ) as ArrayBuffer;
+}
+
 async function createJob(tasks: Record<string, any>): Promise<CloudConvertJob> {
   const apiKey = getCloudConvertApiKey();
 
@@ -139,12 +146,8 @@ async function uploadFile(
     formData.append(key, String(value));
   }
 
-  const uint8 = new Uint8Array(
-    buffer.buffer,
-    buffer.byteOffset,
-    buffer.byteLength
-  );
-  const fileBlob = new Blob([uint8], { type: "application/pdf" });
+  const arrayBuffer = toExactArrayBuffer(buffer);
+  const fileBlob = new Blob([arrayBuffer], { type: "application/pdf" });
   formData.append("file", fileBlob, filename);
 
   const res = await fetch(form.url, {
