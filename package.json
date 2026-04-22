@@ -9,7 +9,9 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@azure/msal-node": "^5.1.3",
     "@supabase/supabase-js": "^2.101.1",
+    "cloudconvert": "^3.0.0",
     "google-auth-library": "^10.6.2",
     "googleapis": "^171.4.0",
     "next": "16.2.2",
