@@ -34,8 +34,8 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    const appBaseUrl = https://order-engine-eight.vercel.app;
-    const cronSecret = my_super_secret_123;
+    const appBaseUrl = getAppBaseUrl();
+    const cronSecret = process.env.CRON_SECRET;
 
     const headers: HeadersInit = {
       "Content-Type": "application/json",
