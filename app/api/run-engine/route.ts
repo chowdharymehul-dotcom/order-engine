@@ -6,10 +6,18 @@ import { getAppBaseUrl } from "@/lib/ocr";
 function isAuthorized(req: NextRequest) {
   const cronSecret = process.env.CRON_SECRET;
 
+  // ✅ Allow Vercel cron automatically
+  const userAgent = req.headers.get("user-agent") || "";
+  if (userAgent.toLowerCase().includes("vercel")) {
+    return true;
+  }
+
+  // ✅ Allow if no secret set (dev fallback)
   if (!cronSecret) {
     return true;
   }
 
+  // ✅ Allow manual calls with secret
   const authHeader = req.headers.get("authorization");
   return authHeader === `Bearer ${cronSecret}`;
 }
@@ -26,28 +34,15 @@ export async function GET(req: NextRequest) {
   try {
     if (!isAuthorized(req)) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: "Unauthorized",
-        },
+        { ok: false, error: "Unauthorized" },
         { status: 401 }
       );
     }
 
     const appBaseUrl = getAppBaseUrl();
-    const cronSecret = process.env.CRON_SECRET;
-
-    const headers: HeadersInit = {
-      "Content-Type": "application/json",
-    };
-
-    if (cronSecret) {
-      headers.Authorization = `Bearer ${cronSecret}`;
-    }
 
     const processEmailsRes1 = await fetch(`${appBaseUrl}/api/process-emails`, {
       method: "GET",
-      headers,
       cache: "no-store",
     });
 
@@ -55,7 +50,6 @@ export async function GET(req: NextRequest) {
 
     const processOcrRes = await fetch(`${appBaseUrl}/api/process-ocr`, {
       method: "GET",
-      headers,
       cache: "no-store",
     });
 
@@ -63,7 +57,6 @@ export async function GET(req: NextRequest) {
 
     const processEmailsRes2 = await fetch(`${appBaseUrl}/api/process-emails`, {
       method: "GET",
-      headers,
       cache: "no-store",
     });
 
