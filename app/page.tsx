@@ -17,29 +17,29 @@ export default function HomePage() {
           <RecentActivity />
         </div>
 
-        <div className="bg-white border rounded p-6 space-y-4">
-          <h2 className="text-xl font-semibold">Quick Actions</h2>
+        <div className="bg-white border rounded-xl p-6 space-y-5 h-fit">
+          <h2 className="text-2xl font-bold text-black">Quick Actions</h2>
 
-          <div className="flex flex-col gap-3">
+          <div className="flex flex-col gap-4">
             <Link
               href="/emails"
-              className="px-4 py-3 border rounded hover:bg-gray-100"
+              className="px-5 py-4 border rounded-xl text-lg font-medium text-black hover:bg-gray-50 transition"
             >
               View Emails
             </Link>
 
             <Link
               href="/orders"
-              className="px-4 py-3 border rounded hover:bg-gray-100"
+              className="px-5 py-4 border rounded-xl text-lg font-medium text-black hover:bg-gray-50 transition"
             >
               View Orders
             </Link>
 
             <Link
-              href="/needs-ocr"
-              className="px-4 py-3 border rounded hover:bg-gray-100"
+              href="/enquiries-follow-up"
+              className="px-5 py-4 border rounded-xl text-lg font-medium text-black hover:bg-gray-50 transition"
             >
-              Needs OCR Queue
+              View Enquiries
             </Link>
           </div>
         </div>

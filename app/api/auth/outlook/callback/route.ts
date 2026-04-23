@@ -63,6 +63,7 @@ export async function GET(req: NextRequest) {
     const accessToken = tokenData.access_token;
     const refreshToken = tokenData.refresh_token;
     const expiresIn = tokenData.expires_in;
+    const scope = tokenData.scope || "";
 
     if (!accessToken) {
       return NextResponse.json(
@@ -76,6 +77,18 @@ export async function GET(req: NextRequest) {
       );
     }
 
+    if (!scope.toLowerCase().includes("mail.send")) {
+      return NextResponse.json(
+        {
+          ok: false,
+          step: "scope_validation",
+          error: "Mail.Send scope was not granted on the returned Outlook token",
+          granted_scope: scope,
+        },
+        { status: 400 }
+      );
+    }
+
     const expiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
 
     const supabaseAdmin = createClient(
@@ -83,7 +96,7 @@ export async function GET(req: NextRequest) {
       process.env.SUPABASE_SERVICE_ROLE_KEY!
     );
 
-    const { data, error: insertError } = await supabaseAdmin
+    const { error: insertError } = await supabaseAdmin
       .from("inbox_connections")
       .insert({
         provider: "outlook",
@@ -92,8 +105,7 @@ export async function GET(req: NextRequest) {
         expires_at: expiresAt,
         connection_status: "active",
         last_error: null,
-      })
-      .select();
+      });
 
     if (insertError) {
       return NextResponse.json(
@@ -106,7 +118,7 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    return NextResponse.redirect("http://localhost:3000");
+    return NextResponse.redirect(new URL("/", req.url));
   } catch (error: any) {
     return NextResponse.json(
       {

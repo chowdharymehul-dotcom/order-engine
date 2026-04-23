@@ -28,9 +28,10 @@ type NotificationItem = {
 
 const navItems = [
   { href: "/", label: "Dashboard" },
+  { href: "/emails", label: "Email", key: "emails" },
   { href: "/orders", label: "Orders", key: "orders" },
-  { href: "/emails", label: "Emails", key: "emails" },
-  { href: "/needs-ocr", label: "Needs OCR", key: "needsOcr" },
+  { href: "/enquiries-follow-up", label: "Enquiries & Follow Up" },
+  { href: "/cancellations", label: "Cancellation" },
 ];
 
 export default function Sidebar() {
@@ -166,17 +167,24 @@ export default function Sidebar() {
         <p className="text-sm text-gray-500 mt-1">AI workflow console</p>
 
         {(notifications.newOrders > 0 || notifications.needsOcr > 0) && (
-          <div className="mt-3 space-y-1 text-xs">
+          <div className="mt-4 space-y-2">
             {notifications.newOrders > 0 && (
-              <div className="text-red-600">
+              <Link
+                href="/orders?filter=new"
+                className="block text-lg font-semibold text-red-600 hover:text-red-700"
+              >
                 {notifications.newOrders} new order
                 {notifications.newOrders > 1 ? "s" : ""}
-              </div>
+              </Link>
             )}
+
             {notifications.needsOcr > 0 && (
-              <div className="text-orange-600">
+              <Link
+                href="/emails?filter=needs_ocr"
+                className="block text-lg font-semibold text-orange-600 hover:text-orange-700"
+              >
                 {notifications.needsOcr} needs OCR
-              </div>
+              </Link>
             )}
           </div>
         )}

@@ -311,10 +311,68 @@ function chooseBestAttachment(attachments: SelectedAttachment[]) {
   return sorted[0];
 }
 
+function isBusinessRelevantPdf(params: {
+  filename?: string;
+  subject?: string;
+  bodyText?: string;
+}) {
+  const text = `${params.filename || ""} ${params.subject || ""} ${
+    params.bodyText || ""
+  }`.toLowerCase();
+
+  const positiveSignals = [
+    "proforma",
+    "invoice",
+    "order confirmation",
+    "purchase order",
+    "purchase",
+    "po ",
+    " po",
+    "pedido",
+    "order",
+    "shipment instruction",
+    "balance payment",
+    "goods ready",
+    "ready goods",
+    "agent",
+    "quantity",
+    "sku",
+    "style no",
+    "style",
+    "ref.",
+    "ref :",
+    "mail dtd",
+    "payment",
+  ];
+
+  const negativeSignals = [
+    "bank statement",
+    "statement",
+    "certificate of origin",
+    "certificate",
+    "credit card",
+    "travel",
+    "hotel",
+    "newsletter",
+    "webinar",
+    "invitation",
+    "invitation to attend",
+    "market compliance",
+    "payment received",
+    "refund",
+    "gst refund",
+  ];
+
+  const hasPositive = positiveSignals.some((signal) => text.includes(signal));
+  const hasNegative = negativeSignals.some((signal) => text.includes(signal));
+
+  return hasPositive && !hasNegative;
+}
+
 async function extractGmailAttachments(
   gmail: any,
   provider: string,
-  msgId: string,
+  messageId: string,
   payload: any
 ) {
   const allParts = collectAllParts(payload, []);
@@ -345,7 +403,7 @@ async function extractGmailAttachments(
       try {
         const attachmentRes = await gmail.users.messages.attachments.get({
           userId: "me",
-          messageId: msgId,
+          messageId,
           id: attachmentId,
         });
 
@@ -381,13 +439,13 @@ async function extractGmailAttachments(
   let attachmentUrl = "";
   let selectedAttachmentName = "";
   let selectedAttachmentMimeType = "";
-  let hasPdfAttachment = false;
+  let selectedAttachmentType = "";
 
   if (bestAttachment && bestAttachment.score > 0) {
     try {
       const uploaded = await uploadAttachmentToSupabase({
         provider,
-        messageId: msgId,
+        messageId,
         filename: bestAttachment.filename,
         fileBuffer: bestAttachment.buffer,
         mimeType: bestAttachment.mimeType,
@@ -396,7 +454,7 @@ async function extractGmailAttachments(
       attachmentUrl = uploaded.publicUrl;
       selectedAttachmentName = bestAttachment.filename;
       selectedAttachmentMimeType = bestAttachment.mimeType;
-      hasPdfAttachment = bestAttachment.category === "pdf";
+      selectedAttachmentType = bestAttachment.category;
     } catch (error) {
       console.error(
         "Gmail selected attachment upload failed:",
@@ -409,10 +467,11 @@ async function extractGmailAttachments(
   return {
     attachmentText: combinedText.trim(),
     attachmentNames,
-    hasPdfAttachment,
     attachmentUrl,
     selectedAttachmentName,
     selectedAttachmentMimeType,
+    selectedAttachmentType,
+    hasPdfAttachment: selectedAttachmentType === "pdf",
   };
 }
 
@@ -439,10 +498,11 @@ async function extractOutlookAttachments(
     return {
       attachmentText: "",
       attachmentNames: [],
-      hasPdfAttachment: false,
       attachmentUrl: "",
       selectedAttachmentName: "",
       selectedAttachmentMimeType: "",
+      selectedAttachmentType: "",
+      hasPdfAttachment: false,
     };
   }
 
@@ -496,7 +556,7 @@ async function extractOutlookAttachments(
   let attachmentUrl = "";
   let selectedAttachmentName = "";
   let selectedAttachmentMimeType = "";
-  let hasPdfAttachment = false;
+  let selectedAttachmentType = "";
 
   if (bestAttachment && bestAttachment.score > 0) {
     try {
@@ -511,7 +571,7 @@ async function extractOutlookAttachments(
       attachmentUrl = uploaded.publicUrl;
       selectedAttachmentName = bestAttachment.filename;
       selectedAttachmentMimeType = bestAttachment.mimeType;
-      hasPdfAttachment = bestAttachment.category === "pdf";
+      selectedAttachmentType = bestAttachment.category;
     } catch (error) {
       console.error(
         "Outlook selected attachment upload failed:",
@@ -524,10 +584,11 @@ async function extractOutlookAttachments(
   return {
     attachmentText: combinedText.trim(),
     attachmentNames,
-    hasPdfAttachment,
     attachmentUrl,
     selectedAttachmentName,
     selectedAttachmentMimeType,
+    selectedAttachmentType,
+    hasPdfAttachment: selectedAttachmentType === "pdf",
   };
 }
 
@@ -535,7 +596,8 @@ async function processOneMessage({
   supabaseAdmin,
   openai,
   provider,
-  externalId,
+  externalMessageId,
+  externalThreadId,
   subject,
   from,
   bodyText,
@@ -545,6 +607,7 @@ async function processOneMessage({
   hasPdfAttachment,
   selectedAttachmentName,
   selectedAttachmentMimeType,
+  selectedAttachmentType,
   receivedAt,
   existingEmail,
   processedResults,
@@ -558,21 +621,43 @@ async function processOneMessage({
   const finalAttachmentUrl =
     attachmentUrl || existingEmail?.attachment_url || null;
 
-  const nextStatus =
-    hasPdfAttachment && !finalAttachmentText
-      ? "needs_ocr"
-      : finalAttachmentText
-      ? "ready_for_ai"
-      : "new";
+  const finalAttachmentName =
+    selectedAttachmentName || existingEmail?.attachment_name || "";
+
+  const finalAttachmentMimeType =
+    selectedAttachmentMimeType || existingEmail?.attachment_mime_type || "";
+
+  const finalAttachmentType =
+    selectedAttachmentType || existingEmail?.attachment_type || "";
+
+  const shouldSendPdfToOcr =
+    finalAttachmentType === "pdf" &&
+    !finalAttachmentText &&
+    isBusinessRelevantPdf({
+      filename: finalAttachmentName,
+      subject,
+      bodyText,
+    });
+
+  const nextStatus = shouldSendPdfToOcr
+    ? "needs_ocr"
+    : finalAttachmentText
+    ? "ready_for_ai"
+    : "new";
 
   const emailPayload = {
     provider,
-    gmail_message_id: externalId,
+    gmail_message_id: externalMessageId,
+    external_message_id: externalMessageId,
+    external_thread_id: externalThreadId || null,
     subject,
     from_email: from,
     body_text: bodyText,
     attachment_text: finalAttachmentText,
     attachment_url: finalAttachmentUrl,
+    attachment_name: finalAttachmentName || null,
+    attachment_mime_type: finalAttachmentMimeType || null,
+    attachment_type: finalAttachmentType || null,
     received_at: receivedAt,
     processing_status: nextStatus,
   };
@@ -590,7 +675,8 @@ async function processOneMessage({
     const { error: updateEmailError } = await supabaseAdmin
       .from("emails")
       .update(emailPayload)
-      .eq("gmail_message_id", externalId);
+      .eq("provider", provider)
+      .eq("external_message_id", externalMessageId);
 
     if (updateEmailError) {
       console.error("❌ Failed to update email:", updateEmailError.message);
@@ -600,28 +686,37 @@ async function processOneMessage({
 
   debug.push({
     provider,
-    gmail_message_id: externalId,
+    external_message_id: externalMessageId,
     subject,
     from,
     hasAttachment: attachmentNames.length > 0,
     hasPdfAttachment,
-    needsOcr: hasPdfAttachment && !finalAttachmentText,
+    businessRelevantPdf: finalAttachmentType === "pdf"
+      ? isBusinessRelevantPdf({
+          filename: finalAttachmentName,
+          subject,
+          bodyText,
+        })
+      : false,
+    needsOcr: shouldSendPdfToOcr,
     attachmentNames,
-    selectedAttachmentName,
-    selectedAttachmentMimeType,
+    selectedAttachmentName: finalAttachmentName,
+    selectedAttachmentMimeType: finalAttachmentMimeType,
+    selectedAttachmentType: finalAttachmentType,
     attachmentUrl: finalAttachmentUrl,
     bodyPreview: (bodyText || "").slice(0, 200),
     attachmentPreview: (finalAttachmentText || "").slice(0, 300),
   });
 
-  if (hasPdfAttachment && !finalAttachmentText) {
+  if (shouldSendPdfToOcr) {
     needsOcr.push({
       provider,
-      gmail_message_id: externalId,
+      external_message_id: externalMessageId,
       subject,
       attachmentNames,
-      selectedAttachmentName,
-      selectedAttachmentMimeType,
+      selectedAttachmentName: finalAttachmentName,
+      selectedAttachmentMimeType: finalAttachmentMimeType,
+      selectedAttachmentType: finalAttachmentType,
       attachmentUrl: finalAttachmentUrl,
     });
     return;
@@ -694,7 +789,7 @@ Return JSON only:
   if (!relevanceParsed.is_relevant) {
     ignored.push({
       provider,
-      gmail_message_id: externalId,
+      external_message_id: externalMessageId,
       subject,
       reason: relevanceParsed.reason || "not_relevant",
     });
@@ -702,10 +797,11 @@ Return JSON only:
     await supabaseAdmin
       .from("emails")
       .update({
-        processing_status: "processed",
+        processing_status: "ignored",
         processed_at: new Date().toISOString(),
       })
-      .eq("gmail_message_id", externalId);
+      .eq("provider", provider)
+      .eq("external_message_id", externalMessageId);
 
     return;
   }
@@ -775,7 +871,8 @@ Rules:
         processing_status: "processed",
         processed_at: new Date().toISOString(),
       })
-      .eq("gmail_message_id", externalId);
+      .eq("provider", provider)
+      .eq("external_message_id", externalMessageId);
 
     return;
   }
@@ -784,6 +881,7 @@ Rules:
     if (!item.sku) continue;
 
     await supabaseAdmin.from("order_items").insert({
+      provider,
       action: item.action,
       customer: parsed.customer || "",
       po_number: parsed.po_number || "",
@@ -792,13 +890,14 @@ Rules:
       notes: item.notes || "",
       status: "New",
       source_email: from,
-      gmail_message_id: externalId,
+      gmail_message_id: externalMessageId,
+      external_message_id: externalMessageId,
       email_subject: subject,
     });
 
     processedResults.push({
       provider,
-      gmail_message_id: externalId,
+      external_message_id: externalMessageId,
       subject,
       sku: item.sku,
       action: item.action,
@@ -811,7 +910,8 @@ Rules:
       processing_status: "processed",
       processed_at: new Date().toISOString(),
     })
-    .eq("gmail_message_id", externalId);
+    .eq("provider", provider)
+    .eq("external_message_id", externalMessageId);
 }
 
 export async function GET(req: NextRequest) {
@@ -897,22 +997,25 @@ export async function GET(req: NextRequest) {
           console.log("📩 Gmail messages found:", messages.length);
 
           for (const msg of messages) {
-            const externalId = msg.id!;
+            const externalMessageId = msg.id!;
+            const externalThreadId = msg.threadId || null;
 
             const { data: existingEmail } = await supabaseAdmin
               .from("emails")
               .select("*")
-              .eq("gmail_message_id", externalId)
+              .eq("provider", "gmail")
+              .eq("external_message_id", externalMessageId)
               .limit(1)
               .maybeSingle();
 
             if (
               existingEmail &&
-              existingEmail.processing_status === "processed"
+              (existingEmail.processing_status === "processed" ||
+                existingEmail.processing_status === "ignored")
             ) {
               skipped.push({
                 provider: "gmail",
-                gmail_message_id: externalId,
+                external_message_id: externalMessageId,
                 reason: "already_processed",
               });
               continue;
@@ -920,7 +1023,7 @@ export async function GET(req: NextRequest) {
 
             const msgRes = await gmail.users.messages.get({
               userId: "me",
-              id: externalId,
+              id: externalMessageId,
               format: "full",
             });
 
@@ -944,10 +1047,11 @@ export async function GET(req: NextRequest) {
               attachmentUrl,
               selectedAttachmentName,
               selectedAttachmentMimeType,
+              selectedAttachmentType,
             } = await extractGmailAttachments(
               gmail,
               "gmail",
-              externalId,
+              externalMessageId,
               payload
             );
 
@@ -955,7 +1059,8 @@ export async function GET(req: NextRequest) {
               supabaseAdmin,
               openai,
               provider: "gmail",
-              externalId,
+              externalMessageId,
+              externalThreadId,
               subject,
               from,
               bodyText,
@@ -965,6 +1070,7 @@ export async function GET(req: NextRequest) {
               hasPdfAttachment,
               selectedAttachmentName,
               selectedAttachmentMimeType,
+              selectedAttachmentType,
               receivedAt: dateHeader
                 ? new Date(dateHeader).toISOString()
                 : new Date().toISOString(),
@@ -989,7 +1095,7 @@ export async function GET(req: NextRequest) {
           }
 
           const listRes = await fetch(
-            "https://graph.microsoft.com/v1.0/me/messages?$top=20&$select=id,subject,from,receivedDateTime,bodyPreview,body,hasAttachments",
+            "https://graph.microsoft.com/v1.0/me/messages?$top=20&$select=id,conversationId,subject,from,receivedDateTime,bodyPreview,body,hasAttachments",
             {
               headers: {
                 Authorization: `Bearer ${accessToken}`,
@@ -1018,22 +1124,25 @@ export async function GET(req: NextRequest) {
           console.log("📩 Outlook messages found:", messages.length);
 
           for (const msg of messages) {
-            const externalId = msg.id;
+            const externalMessageId = msg.id;
+            const externalThreadId = msg.conversationId || null;
 
             const { data: existingEmail } = await supabaseAdmin
               .from("emails")
               .select("*")
-              .eq("gmail_message_id", externalId)
+              .eq("provider", "outlook")
+              .eq("external_message_id", externalMessageId)
               .limit(1)
               .maybeSingle();
 
             if (
               existingEmail &&
-              existingEmail.processing_status === "processed"
+              (existingEmail.processing_status === "processed" ||
+                existingEmail.processing_status === "ignored")
             ) {
               skipped.push({
                 provider: "outlook",
-                gmail_message_id: externalId,
+                external_message_id: externalMessageId,
                 reason: "already_processed",
               });
               continue;
@@ -1052,17 +1161,19 @@ export async function GET(req: NextRequest) {
               attachmentUrl,
               selectedAttachmentName,
               selectedAttachmentMimeType,
+              selectedAttachmentType,
             } = await extractOutlookAttachments(
               "outlook",
               accessToken,
-              externalId
+              externalMessageId
             );
 
             await processOneMessage({
               supabaseAdmin,
               openai,
               provider: "outlook",
-              externalId,
+              externalMessageId,
+              externalThreadId,
               subject,
               from,
               bodyText,
@@ -1072,6 +1183,7 @@ export async function GET(req: NextRequest) {
               hasPdfAttachment,
               selectedAttachmentName,
               selectedAttachmentMimeType,
+              selectedAttachmentType,
               receivedAt,
               existingEmail,
               processedResults,
