@@ -34,8 +34,8 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    const appBaseUrl = getAppBaseUrl();
-    const cronSecret = process.env.CRON_SECRET;
+    const appBaseUrl = https://order-engine-eight.vercel.app;
+    const cronSecret = my_super_secret_123;
 
     const headers: HeadersInit = {
       "Content-Type": "application/json",
@@ -45,7 +45,6 @@ export async function GET(req: NextRequest) {
       headers.Authorization = `Bearer ${cronSecret}`;
     }
 
-    // Pass 1: process new emails
     const processEmailsRes1 = await fetch(`${appBaseUrl}/api/process-emails`, {
       method: "GET",
       headers,
@@ -54,7 +53,6 @@ export async function GET(req: NextRequest) {
 
     const processEmailsJson1 = await safeJson(processEmailsRes1);
 
-    // Pass 2: explicitly run OCR queue as well, so it does not depend only on nesting
     const processOcrRes = await fetch(`${appBaseUrl}/api/process-ocr`, {
       method: "GET",
       headers,
@@ -63,7 +61,6 @@ export async function GET(req: NextRequest) {
 
     const processOcrJson = await safeJson(processOcrRes);
 
-    // Pass 3: re-run emails once more so any freshly OCR'd text is parsed immediately
     const processEmailsRes2 = await fetch(`${appBaseUrl}/api/process-emails`, {
       method: "GET",
       headers,
