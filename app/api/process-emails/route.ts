@@ -18,6 +18,8 @@ type SelectedAttachment = {
   score: number;
 };
 
+const MAX_OCR_ATTEMPTS = 3;
+
 function decodeBase64Url(data: string) {
   return Buffer.from(data.replace(/-/g, "+").replace(/_/g, "/"), "base64");
 }
@@ -121,10 +123,7 @@ async function markConnectionExpired(
   }
 }
 
-async function markConnectionActive(
-  supabaseAdmin: any,
-  connectionId: string
-) {
+async function markConnectionActive(supabaseAdmin: any, connectionId: string) {
   const { error } = await supabaseAdmin
     .from("inbox_connections")
     .update({
@@ -163,8 +162,7 @@ async function refreshOutlookToken(connection: any, supabaseAdmin: any) {
 
   const newAccessToken = data.access_token;
   const newRefreshToken = data.refresh_token || connection.refresh_token;
-  const expiresIn = data.expires_in;
-  const expiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
+  const expiresAt = new Date(Date.now() + data.expires_in * 1000).toISOString();
 
   const { error } = await supabaseAdmin
     .from("inbox_connections")
@@ -214,15 +212,11 @@ function isSkippableGmailPart(filename: string, mimeType: string) {
 
   if (lowerMime.startsWith("multipart/")) return true;
 
-  if (
+  return (
     lowerFilename.includes("multipart") ||
     lowerFilename.startsWith("unnamed") ||
     lowerFilename === "attachment"
-  ) {
-    return true;
-  }
-
-  return false;
+  );
 }
 
 function getAttachmentCategory(
@@ -232,9 +226,7 @@ function getAttachmentCategory(
   const lower = normalizeFilename(filename);
   const lowerMime = (mimeType || "").toLowerCase();
 
-  if (lower.endsWith(".pdf") || lowerMime === "application/pdf") {
-    return "pdf";
-  }
+  if (lower.endsWith(".pdf") || lowerMime === "application/pdf") return "pdf";
 
   if (
     lower.endsWith(".txt") ||
@@ -262,9 +254,7 @@ function getAttachmentCategory(
     return "document";
   }
 
-  if (lowerMime.startsWith("image/")) {
-    return "image";
-  }
+  if (lowerMime.startsWith("image/")) return "image";
 
   return "other";
 }
@@ -273,9 +263,7 @@ function getAttachmentScore(filename: string, mimeType: string, size: number) {
   const lower = normalizeFilename(filename);
   const category = getAttachmentCategory(filename, mimeType);
 
-  if (isInlineOrSignatureLike(filename, mimeType)) {
-    return -1000;
-  }
+  if (isInlineOrSignatureLike(filename, mimeType)) return -1000;
 
   let score = 0;
 
@@ -306,9 +294,7 @@ function getAttachmentScore(filename: string, mimeType: string, size: number) {
 
 function chooseBestAttachment(attachments: SelectedAttachment[]) {
   if (!attachments.length) return null;
-
-  const sorted = [...attachments].sort((a, b) => b.score - a.score);
-  return sorted[0];
+  return [...attachments].sort((a, b) => b.score - a.score)[0];
 }
 
 function isBusinessRelevantPdf(params: {
@@ -408,9 +394,7 @@ async function extractGmailAttachments(
         });
 
         const rawData = attachmentRes.data.data;
-        if (rawData) {
-          buffer = decodeBase64Url(rawData);
-        }
+        if (rawData) buffer = decodeBase64Url(rawData);
       } catch (error) {
         console.error("Gmail attachment fetch failed:", safeFilename, error);
       }
@@ -592,6 +576,205 @@ async function extractOutlookAttachments(
   };
 }
 
+async function runBodyOnlyFallback(params: {
+  supabaseAdmin: any;
+  openai: OpenAI;
+  provider: string;
+  externalMessageId: string;
+  subject: string;
+  from: string;
+  bodyText: string;
+  processedResults: any[];
+  ignored: any[];
+}) {
+  const {
+    supabaseAdmin,
+    openai,
+    provider,
+    externalMessageId,
+    subject,
+    from,
+    bodyText,
+    processedResults,
+    ignored,
+  } = params;
+
+  const combinedInput = `
+Subject: ${subject}
+From: ${from}
+
+EMAIL BODY:
+${bodyText}
+
+NOTE:
+OCR failed or was unavailable.
+Use ONLY the email body.
+Do NOT assume PDF content.
+`;
+
+  const relevanceResponse = await openai.chat.completions.create({
+    model: "gpt-4.1-mini",
+    response_format: { type: "json_object" },
+    messages: [
+      {
+        role: "system",
+        content: `
+Classify whether this email is relevant for business workflow processing.
+
+Relevant means the email contains one or more of:
+- order placement
+- product enquiry
+- delivery enquiry
+- follow up on products/orders
+- cancellation request
+- delivery confirmation
+- PO / purchase order / SKU / quantity style business instructions
+
+Return JSON only:
+{
+  "is_relevant": true,
+  "reason": ""
+}
+`,
+      },
+      {
+        role: "user",
+        content: combinedInput,
+      },
+    ],
+  });
+
+  let relevanceParsed: any = { is_relevant: false, reason: "parse_failed" };
+
+  try {
+    relevanceParsed = JSON.parse(
+      relevanceResponse.choices[0]?.message?.content || "{}"
+    );
+  } catch {
+    relevanceParsed = { is_relevant: false, reason: "parse_failed" };
+  }
+
+  if (!relevanceParsed.is_relevant) {
+    ignored.push({
+      provider,
+      external_message_id: externalMessageId,
+      subject,
+      reason: relevanceParsed.reason || "ocr_failed_body_fallback_not_relevant",
+    });
+
+    await supabaseAdmin
+      .from("emails")
+      .update({
+        processing_status: "ignored",
+        processed_at: new Date().toISOString(),
+        last_processing_error: "OCR failed + fallback ignored",
+      })
+      .eq("provider", provider)
+      .eq("external_message_id", externalMessageId);
+
+    return;
+  }
+
+  const aiResponse = await openai.chat.completions.create({
+    model: "gpt-4.1",
+    response_format: { type: "json_object" },
+    messages: [
+      {
+        role: "system",
+        content: `
+Extract structured business actions using ONLY email body content.
+
+Return JSON:
+{
+  "customer": "",
+  "po_number": "",
+  "items": [
+    {
+      "action": "",
+      "sku": "",
+      "quantity": 0,
+      "notes": ""
+    }
+  ]
+}
+
+Rules:
+- Do NOT assume PDF content.
+- OCR/PDF text is unavailable.
+- Extract multiple SKUs as separate items only if explicitly present in email body.
+- Valid actions: Place Order, Reply to Enquiry, Follow Up, Cancel Order, Confirm Delivery
+- NEVER create an item with blank SKU.
+- NEVER create a Place Order item unless SKU is explicitly present in email body.
+- If body only says PO/PDF is attached but does not include SKU/order lines, return empty items.
+`,
+      },
+      {
+        role: "user",
+        content: combinedInput,
+      },
+    ],
+  });
+
+  let parsed: any = { customer: "", po_number: "", items: [] };
+
+  try {
+    parsed = JSON.parse(aiResponse.choices[0]?.message?.content || "{}");
+  } catch {
+    parsed = { customer: "", po_number: "", items: [] };
+  }
+
+  if (!parsed.items || !Array.isArray(parsed.items) || parsed.items.length === 0) {
+    await supabaseAdmin
+      .from("emails")
+      .update({
+        processing_status: "processed",
+        processed_at: new Date().toISOString(),
+        last_processing_error: "OCR failed + fallback no body-only items",
+      })
+      .eq("provider", provider)
+      .eq("external_message_id", externalMessageId);
+
+    return;
+  }
+
+  for (const item of parsed.items) {
+    if (!item.sku) continue;
+
+    await supabaseAdmin.from("order_items").insert({
+      provider,
+      action: item.action || "Reply to Enquiry",
+      customer: parsed.customer || "",
+      po_number: parsed.po_number || "",
+      sku: item.sku,
+      quantity: item.quantity || null,
+      notes: item.notes || "Created via OCR fallback using email body only.",
+      status: "New",
+      source_email: from,
+      gmail_message_id: externalMessageId,
+      external_message_id: externalMessageId,
+      email_subject: subject,
+    });
+
+    processedResults.push({
+      provider,
+      external_message_id: externalMessageId,
+      subject,
+      sku: item.sku,
+      action: item.action || "Reply to Enquiry",
+    });
+  }
+
+  await supabaseAdmin
+    .from("emails")
+    .update({
+      processing_status: "processed",
+      processed_at: new Date().toISOString(),
+      last_processing_error: "OCR failed + fallback used",
+    })
+    .eq("provider", provider)
+    .eq("external_message_id", externalMessageId);
+}
+
 async function processOneMessage({
   supabaseAdmin,
   openai,
@@ -615,8 +798,8 @@ async function processOneMessage({
   ignored,
   debug,
 }: any) {
-  const finalAttachmentText =
-    attachmentText || existingEmail?.attachment_text || "";
+  const existingAttachmentText = existingEmail?.attachment_text || "";
+  const finalAttachmentText = attachmentText || existingAttachmentText || "";
 
   const finalAttachmentUrl =
     attachmentUrl || existingEmail?.attachment_url || null;
@@ -630,20 +813,41 @@ async function processOneMessage({
   const finalAttachmentType =
     selectedAttachmentType || existingEmail?.attachment_type || "";
 
-  const shouldSendPdfToOcr =
+  const isRelevantPdf =
     finalAttachmentType === "pdf" &&
-    !finalAttachmentText &&
     isBusinessRelevantPdf({
       filename: finalAttachmentName,
       subject,
       bodyText,
     });
 
-  const nextStatus = shouldSendPdfToOcr
-    ? "needs_ocr"
-    : finalAttachmentText
-    ? "ready_for_ai"
-    : "new";
+  const existingStatus = existingEmail?.processing_status || "";
+  const hasUsableExtractedText = finalAttachmentText.trim().length > 0;
+  const ocrAttempts = Number(existingEmail?.ocr_attempts || 0);
+
+  const isTerminalOcrState =
+    existingStatus === "ocr_failed" ||
+    existingStatus === "ocr_blocked" ||
+    (existingStatus === "needs_ocr" && ocrAttempts >= MAX_OCR_ATTEMPTS);
+
+  const shouldSendPdfToOcr =
+    isRelevantPdf && !hasUsableExtractedText && !isTerminalOcrState;
+
+  let nextStatus = existingStatus || "new";
+
+  if (hasUsableExtractedText) {
+    if (existingStatus === "processed" || existingStatus === "ignored") {
+      nextStatus = existingStatus;
+    } else {
+      nextStatus = "ready_for_ai";
+    }
+  } else if (shouldSendPdfToOcr) {
+    nextStatus = "needs_ocr";
+  } else if (isTerminalOcrState) {
+    nextStatus = existingStatus || "ocr_failed";
+  } else if (!existingStatus) {
+    nextStatus = "new";
+  }
 
   const emailPayload = {
     provider,
@@ -691,14 +895,13 @@ async function processOneMessage({
     from,
     hasAttachment: attachmentNames.length > 0,
     hasPdfAttachment,
-    businessRelevantPdf: finalAttachmentType === "pdf"
-      ? isBusinessRelevantPdf({
-          filename: finalAttachmentName,
-          subject,
-          bodyText,
-        })
-      : false,
-    needsOcr: shouldSendPdfToOcr,
+    businessRelevantPdf: isRelevantPdf,
+    existingStatus,
+    hasUsableExtractedText,
+    ocrAttempts,
+    isTerminalOcrState,
+    shouldSendPdfToOcr,
+    nextStatus,
     attachmentNames,
     selectedAttachmentName: finalAttachmentName,
     selectedAttachmentMimeType: finalAttachmentMimeType,
@@ -719,6 +922,22 @@ async function processOneMessage({
       selectedAttachmentType: finalAttachmentType,
       attachmentUrl: finalAttachmentUrl,
     });
+    return;
+  }
+
+  if (isTerminalOcrState && !hasUsableExtractedText) {
+    await runBodyOnlyFallback({
+      supabaseAdmin,
+      openai,
+      provider,
+      externalMessageId,
+      subject,
+      from,
+      bodyText,
+      processedResults,
+      ignored,
+    });
+
     return;
   }
 
@@ -776,12 +995,12 @@ Return JSON only:
     ],
   });
 
-  const relevanceRaw =
-    relevanceResponse.choices[0].message.content || '{"is_relevant":false}';
-
   let relevanceParsed: any = { is_relevant: false, reason: "" };
+
   try {
-    relevanceParsed = JSON.parse(relevanceRaw);
+    relevanceParsed = JSON.parse(
+      relevanceResponse.choices[0]?.message?.content || "{}"
+    );
   } catch {
     relevanceParsed = { is_relevant: false, reason: "parse_failed" };
   }
@@ -851,20 +1070,15 @@ Rules:
     ],
   });
 
-  const raw = aiResponse.choices[0].message.content || "{}";
+  let parsed: any = { customer: "", po_number: "", items: [] };
 
-  let parsed: any = {};
   try {
-    parsed = JSON.parse(raw);
+    parsed = JSON.parse(aiResponse.choices[0]?.message?.content || "{}");
   } catch {
     parsed = { customer: "", po_number: "", items: [] };
   }
 
-  if (
-    !parsed.items ||
-    !Array.isArray(parsed.items) ||
-    parsed.items.length === 0
-  ) {
+  if (!parsed.items || !Array.isArray(parsed.items) || parsed.items.length === 0) {
     await supabaseAdmin
       .from("emails")
       .update({
@@ -1107,6 +1321,7 @@ export async function GET(req: NextRequest) {
           const raw = await listRes.text();
 
           let data: any = null;
+
           try {
             data = JSON.parse(raw);
           } catch {
@@ -1114,7 +1329,9 @@ export async function GET(req: NextRequest) {
           }
 
           if (!listRes.ok) {
-            throw new Error(data?.error?.message || raw || "Outlook fetch failed");
+            throw new Error(
+              data?.error?.message || raw || "Outlook fetch failed"
+            );
           }
 
           await markConnectionActive(supabaseAdmin, connection.id);
@@ -1204,16 +1421,12 @@ export async function GET(req: NextRequest) {
         if (isTokenExpiredError(errorMessage)) {
           await markConnectionExpired(supabaseAdmin, connection.id, errorMessage);
         } else {
-          const { error: updateError } = await supabaseAdmin
+          await supabaseAdmin
             .from("inbox_connections")
             .update({
               last_error: errorMessage,
             })
             .eq("id", connection.id);
-
-          if (updateError) {
-            console.error("❌ Failed to save provider error:", updateError.message);
-          }
         }
 
         providerErrors.push({
@@ -1276,9 +1489,6 @@ export async function GET(req: NextRequest) {
   } catch (error: any) {
     console.error("❌ ERROR:", error.message);
 
-    return NextResponse.json(
-      { error: error.message },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
