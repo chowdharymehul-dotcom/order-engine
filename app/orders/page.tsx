@@ -14,21 +14,28 @@ type OrderItem = {
   quantity: number | null;
   notes: string | null;
   status: string | null;
+  source_email: string | null;
   email_subject: string | null;
   external_message_id: string | null;
   gmail_message_id: string | null;
 };
 
-type EmailLookup = {
-  id: string;
+type EmailRow = {
   external_message_id: string | null;
   gmail_message_id: string | null;
   received_at: string | null;
 };
 
-type OrderRow = OrderItem & {
-  source_email_id?: string;
-  source_received_at?: string | null;
+type GroupedOrder = {
+  key: string;
+  received_at: string | null;
+  action: string;
+  customer: string;
+  po_number: string;
+  notes: string;
+  status: string;
+  original_mail: string;
+  items: OrderItem[];
 };
 
 type OrdersPageProps = {
@@ -38,56 +45,47 @@ type OrdersPageProps = {
   }>;
 };
 
-type ActionFilter = {
-  label: string;
-  value: string;
-};
+function tabClass(active: boolean) {
+  return `px-5 py-3 rounded-lg border text-sm font-medium transition ${
+    active
+      ? "bg-gray-100 border-gray-400 text-black"
+      : "bg-white text-black hover:bg-gray-50"
+  }`;
+}
 
-type StatusFilter = {
-  label: string;
-  value: string;
-};
+function normalizeAction(action: string | null) {
+  if (!action) return "";
+  if (action === "Place Order") return "New Order";
+  return action;
+}
 
-function buildOrdersHref(action: string, status: string) {
-  const params = new URLSearchParams();
+function getGroupStatus(items: OrderItem[]) {
+  const statuses = items.map((item) => item.status || "New");
 
-  if (action !== "All") {
-    params.set("action", action);
-  }
+  if (statuses.some((status) => status === "New")) return "New";
+  if (statuses.some((status) => status === "Approved")) return "Approved";
+  if (statuses.every((status) => status === "Done")) return "Done";
 
-  if (status !== "All") {
-    params.set("status", status);
-  }
-
-  const query = params.toString();
-  return query ? `/orders?${query}` : "/orders";
+  return statuses[0] || "New";
 }
 
 export default async function OrdersPage({ searchParams }: OrdersPageProps) {
   const params = await searchParams;
-  const selectedAction = params?.action || "All";
-  const selectedStatus = params?.status || "All";
+  const activeAction = params?.action || "all";
+  const activeStatus = params?.status || "all";
 
-  const supabaseAdmin = createClient(
+  const supabase = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!
   );
 
-  let query = supabaseAdmin
+  const { data, error } = await supabase
     .from("order_items")
     .select(
-      "id, action, customer, po_number, sku, quantity, notes, status, email_subject, external_message_id, gmail_message_id"
-    );
-
-  if (selectedAction !== "All") {
-    query = query.eq("action", selectedAction);
-  }
-
-  if (selectedStatus !== "All") {
-    query = query.eq("status", selectedStatus);
-  }
-
-  const { data, error } = await query;
+      "id, action, customer, po_number, sku, quantity, notes, status, source_email, email_subject, external_message_id, gmail_message_id"
+    )
+    .eq("action", "Place Order")
+    .order("id", { ascending: false });
 
   if (error) {
     return (
@@ -98,96 +96,118 @@ export default async function OrdersPage({ searchParams }: OrdersPageProps) {
     );
   }
 
-  const orders = (data ?? []) as OrderItem[];
+  const items = (data ?? []) as OrderItem[];
 
   const externalIds = Array.from(
     new Set(
-      orders
-        .map((order) => order.external_message_id)
+      items
+        .map((item) => item.external_message_id)
         .filter((id): id is string => !!id)
     )
   );
 
-  const legacyIds = Array.from(
+  const gmailIds = Array.from(
     new Set(
-      orders
-        .map((order) => order.gmail_message_id)
+      items
+        .map((item) => item.gmail_message_id)
         .filter((id): id is string => !!id)
     )
   );
 
-  let emailMap = new Map<string, EmailLookup>();
+  const emailMap = new Map<string, EmailRow>();
 
   if (externalIds.length > 0) {
-    const { data: emailRows } = await supabaseAdmin
+    const { data: emailRows } = await supabase
       .from("emails")
-      .select("id, external_message_id, gmail_message_id, received_at")
+      .select("external_message_id, gmail_message_id, received_at")
       .in("external_message_id", externalIds);
 
-    const emails = (emailRows ?? []) as EmailLookup[];
-
-    for (const email of emails) {
+    for (const email of (emailRows ?? []) as EmailRow[]) {
       if (email.external_message_id) {
         emailMap.set(email.external_message_id, email);
       }
     }
   }
 
-  if (legacyIds.length > 0) {
-    const { data: legacyEmailRows } = await supabaseAdmin
+  if (gmailIds.length > 0) {
+    const { data: gmailEmailRows } = await supabase
       .from("emails")
-      .select("id, external_message_id, gmail_message_id, received_at")
-      .in("gmail_message_id", legacyIds);
+      .select("external_message_id, gmail_message_id, received_at")
+      .in("gmail_message_id", gmailIds);
 
-    const legacyEmails = (legacyEmailRows ?? []) as EmailLookup[];
-
-    for (const email of legacyEmails) {
-      if (email.gmail_message_id && !emailMap.has(email.gmail_message_id)) {
+    for (const email of (gmailEmailRows ?? []) as EmailRow[]) {
+      if (email.gmail_message_id) {
         emailMap.set(email.gmail_message_id, email);
       }
     }
   }
 
-  const enrichedOrders: OrderRow[] = orders.map((order) => {
-    const emailKey = order.external_message_id || order.gmail_message_id || "";
-    const linkedEmail = emailKey ? emailMap.get(emailKey) : undefined;
+  const groupedMap = new Map<string, OrderItem[]>();
 
-    return {
-      ...order,
-      source_email_id: linkedEmail?.id,
-      source_received_at: linkedEmail?.received_at || null,
-    };
+  for (const item of items) {
+    const key =
+      item.external_message_id ||
+      item.gmail_message_id ||
+      item.email_subject ||
+      item.id;
+
+    if (!groupedMap.has(key)) {
+      groupedMap.set(key, []);
+    }
+
+    groupedMap.get(key)!.push(item);
+  }
+
+  const groupedOrders: GroupedOrder[] = Array.from(groupedMap.entries()).map(
+    ([key, groupItems]) => {
+      const first = groupItems[0];
+      const email =
+        emailMap.get(first.external_message_id || "") ||
+        emailMap.get(first.gmail_message_id || "");
+
+      return {
+        key,
+        received_at: email?.received_at || null,
+        action: normalizeAction(first.action),
+        customer: first.customer || "",
+        po_number: first.po_number || "",
+        notes: groupItems
+          .map((item) => item.notes)
+          .filter(Boolean)
+          .join(" | "),
+        status: getGroupStatus(groupItems),
+        original_mail: first.email_subject || first.source_email || "",
+        items: groupItems,
+      };
+    }
+  );
+
+  const filteredOrders = groupedOrders.filter((order) => {
+    if (activeAction !== "all") {
+      if (activeAction === "new_order" && order.action !== "New Order") {
+        return false;
+      }
+    }
+
+    if (activeStatus !== "all") {
+      if (order.status.toLowerCase() !== activeStatus.toLowerCase()) {
+        return false;
+      }
+    }
+
+    return true;
   });
 
-  enrichedOrders.sort((a, b) => {
-    const aTime = a.source_received_at
-      ? new Date(a.source_received_at).getTime()
-      : 0;
-    const bTime = b.source_received_at
-      ? new Date(b.source_received_at).getTime()
-      : 0;
+  const sortedOrders = [...filteredOrders].sort((a, b) => {
+    const aTime = a.received_at ? new Date(a.received_at).getTime() : 0;
+    const bTime = b.received_at ? new Date(b.received_at).getTime() : 0;
 
     if (aTime !== bTime) {
       return bTime - aTime;
     }
 
-    return Number(b.id) - Number(a.id);
+    return String(b.key).localeCompare(String(a.key));
   });
-
-  const actionFilters: ActionFilter[] = [
-    { label: "All", value: "All" },
-    { label: "New Order", value: "Place Order" },
-    { label: "Enquiry", value: "Reply to Enquiry" },
-    { label: "Follow Up", value: "Follow Up" },
-    { label: "Cancel", value: "Cancel Order" },
-  ];
-
-  const statusFilters: StatusFilter[] = [
-    { label: "All", value: "All" },
-    { label: "New", value: "New" },
-    { label: "Approved", value: "Approved" },
-    { label: "Done", value: "Done" },
-  ];
 
   return (
     <div className="p-10 space-y-8">
@@ -195,6 +215,7 @@ export default async function OrdersPage({ searchParams }: OrdersPageProps) {
 
       <div className="flex items-center justify-between">
         <h1 className="text-3xl font-bold">Orders Dashboard</h1>
+
         <div className="flex gap-3">
           <Link
             href="/emails"
@@ -202,59 +223,68 @@ export default async function OrdersPage({ searchParams }: OrdersPageProps) {
           >
             Emails
           </Link>
+
           <Link
-            href="/needs-ocr"
+            href="/enquiries-follow-up"
             className="px-4 py-2 border rounded-lg hover:bg-gray-50"
           >
-            Needs OCR
+            Enquiries
           </Link>
         </div>
       </div>
 
       <div className="bg-white border rounded-xl p-6 space-y-6">
         <div>
-          <div className="text-sm font-semibold mb-3">Filter by Action</div>
-          <div className="flex flex-wrap gap-3">
-            {actionFilters.map((action) => {
-              const isActive = selectedAction === action.value;
+          <h2 className="font-semibold mb-3">Filter by Action</h2>
 
-              return (
-                <Link
-                  key={action.value}
-                  href={buildOrdersHref(action.value, selectedStatus)}
-                  className={`px-5 py-3 rounded-lg border text-sm font-medium transition ${
-                    isActive
-                      ? "bg-gray-100 border-gray-400 text-black"
-                      : "bg-white text-black hover:bg-gray-50"
-                  }`}
-                >
-                  {action.label}
-                </Link>
-              );
-            })}
+          <div className="flex flex-wrap gap-3">
+            <Link
+              href={`/orders?status=${activeStatus}`}
+              className={tabClass(activeAction === "all")}
+            >
+              All
+            </Link>
+
+            <Link
+              href={`/orders?action=new_order&status=${activeStatus}`}
+              className={tabClass(activeAction === "new_order")}
+            >
+              New Order
+            </Link>
           </div>
         </div>
 
         <div>
-          <div className="text-sm font-semibold mb-3">Filter by Status</div>
-          <div className="flex flex-wrap gap-3">
-            {statusFilters.map((status) => {
-              const isActive = selectedStatus === status.value;
+          <h2 className="font-semibold mb-3">Filter by Status</h2>
 
-              return (
-                <Link
-                  key={status.value}
-                  href={buildOrdersHref(selectedAction, status.value)}
-                  className={`px-5 py-3 rounded-lg border text-sm font-medium transition ${
-                    isActive
-                      ? "bg-gray-100 border-gray-400 text-black"
-                      : "bg-white text-black hover:bg-gray-50"
-                  }`}
-                >
-                  {status.label}
-                </Link>
-              );
-            })}
+          <div className="flex flex-wrap gap-3">
+            <Link
+              href={`/orders?action=${activeAction}`}
+              className={tabClass(activeStatus === "all")}
+            >
+              All
+            </Link>
+
+            <Link
+              href={`/orders?action=${activeAction}&status=new`}
+              className={tabClass(activeStatus === "new")}
+            >
+              New
+            </Link>
+
+            <Link
+              href={`/orders?action=${activeAction}&status=approved`}
+              className={tabClass(activeStatus === "approved")}
+            >
+              Approved
+            </Link>
+
+            <Link
+              href={`/orders?action=${activeAction}&status=done`}
+              className={tabClass(activeStatus === "done")}
+            >
+              Done
+            </Link>
           </div>
         </div>
       </div>
@@ -263,6 +293,7 @@ export default async function OrdersPage({ searchParams }: OrdersPageProps) {
         <table className="w-full border-collapse text-sm">
           <thead>
             <tr className="bg-gray-100">
+              <th className="p-3 border text-left">Received On</th>
               <th className="p-3 border text-left">Action</th>
               <th className="p-3 border text-left">Customer</th>
               <th className="p-3 border text-left">PO Number</th>
@@ -274,54 +305,78 @@ export default async function OrdersPage({ searchParams }: OrdersPageProps) {
               <th className="p-3 border text-left">Action</th>
             </tr>
           </thead>
+
           <tbody>
-            {enrichedOrders.length === 0 ? (
+            {sortedOrders.length === 0 ? (
               <tr>
-                <td colSpan={9} className="p-6 text-center text-gray-500">
-                  No order items found.
+                <td colSpan={10} className="p-6 text-center text-gray-500">
+                  No orders found
                 </td>
               </tr>
             ) : (
-              enrichedOrders.map((order) => (
-                <tr key={order.id} className="hover:bg-gray-50 align-top">
-                  <td className="p-3 border">{order.action || ""}</td>
-                  <td className="p-3 border">{order.customer || ""}</td>
-                  <td className="p-3 border">{order.po_number || ""}</td>
-                  <td className="p-3 border font-medium">{order.sku || ""}</td>
-                  <td className="p-3 border">{order.quantity ?? ""}</td>
-                  <td className="p-3 border">{order.notes || ""}</td>
-                  <td className="p-3 border">{order.status || ""}</td>
-                  <td className="p-3 border">
-                    {order.source_email_id ? (
-                      <Link
-                        href={`/emails/${order.source_email_id}`}
-                        className="text-blue-600 underline"
-                      >
-                        {order.email_subject || "View Email"}
-                      </Link>
-                    ) : (
-                      order.email_subject || ""
-                    )}
+              sortedOrders.map((order) => (
+                <tr key={order.key} className="hover:bg-gray-50">
+                  <td className="p-3 border whitespace-nowrap">
+                    {order.received_at
+                      ? new Date(order.received_at).toLocaleString()
+                      : ""}
                   </td>
+
+                  <td className="p-3 border">{order.action}</td>
+
+                  <td className="p-3 border">{order.customer}</td>
+
+                  <td className="p-3 border">{order.po_number}</td>
+
+                  <td className="p-3 border">
+                    <div className="space-y-1">
+                      {order.items.map((item) => (
+                        <div key={item.id}>{item.sku || ""}</div>
+                      ))}
+                    </div>
+                  </td>
+
+                  <td className="p-3 border">
+                    <div className="space-y-1">
+                      {order.items.map((item) => (
+                        <div key={item.id}>{item.quantity ?? ""}</div>
+                      ))}
+                    </div>
+                  </td>
+
+                  <td className="p-3 border">{order.notes}</td>
+
+                  <td className="p-3 border">{order.status}</td>
+
+                  <td className="p-3 border">{order.original_mail}</td>
+
                   <td className="p-3 border">
                     <div className="flex flex-col gap-2">
                       <form action="/api/orders/approve" method="POST">
-                        <input type="hidden" name="order_id" value={order.id} />
-                        <button className="w-full px-3 py-2 bg-green-600 text-white rounded-lg text-sm hover:bg-green-700 transition">
+                        <input
+                          type="hidden"
+                          name="external_message_id"
+                          value={order.key}
+                        />
+                        <button className="px-4 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700">
                           Approve
                         </button>
                       </form>
 
-                      <form action="/api/orders/done" method="POST">
-                        <input type="hidden" name="order_id" value={order.id} />
-                        <button className="w-full px-3 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 transition">
+                      <form action="/api/orders/mark-done" method="POST">
+                        <input
+                          type="hidden"
+                          name="external_message_id"
+                          value={order.key}
+                        />
+                        <button className="px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700">
                           Mark Done
                         </button>
                       </form>
 
                       <Link
-                        href={`/orders/${order.id}/edit`}
-                        className="w-full px-3 py-2 bg-gray-200 text-black rounded-lg text-sm text-center hover:bg-gray-300 transition"
+                        href={`/orders/${order.items[0].id}/edit`}
+                        className="px-4 py-2 rounded-lg bg-gray-200 text-center hover:bg-gray-300"
                       >
                         Edit
                       </Link>

@@ -7,18 +7,16 @@ import { useEffect, useRef, useState } from "react";
 type Counts = {
   orders: number;
   emails: number;
-  needsOcr: number;
 };
 
 type Notifications = {
   newOrders: number;
-  needsOcr: number;
   total: number;
 };
 
 type NotificationItem = {
   id: string;
-  type: "order" | "ocr";
+  type: "order";
   title: string;
   subtitle: string;
   meta: string;
@@ -36,15 +34,14 @@ const navItems = [
 
 export default function Sidebar() {
   const pathname = usePathname();
+
   const [counts, setCounts] = useState<Counts>({
     orders: 0,
     emails: 0,
-    needsOcr: 0,
   });
 
   const [notifications, setNotifications] = useState<Notifications>({
     newOrders: 0,
-    needsOcr: 0,
     total: 0,
   });
 
@@ -68,7 +65,6 @@ export default function Sidebar() {
           setCounts({
             orders: data.orders || 0,
             emails: data.emails || 0,
-            needsOcr: data.needsOcr || 0,
           });
         }
       } catch {
@@ -88,7 +84,6 @@ export default function Sidebar() {
         if (isMounted) {
           setNotifications({
             newOrders: data.newOrders || 0,
-            needsOcr: data.needsOcr || 0,
             total: data.total || 0,
           });
         }
@@ -166,26 +161,15 @@ export default function Sidebar() {
 
         <p className="text-sm text-gray-500 mt-1">AI workflow console</p>
 
-        {(notifications.newOrders > 0 || notifications.needsOcr > 0) && (
+        {notifications.newOrders > 0 && (
           <div className="mt-4 space-y-2">
-            {notifications.newOrders > 0 && (
-              <Link
-                href="/orders?filter=new"
-                className="block text-lg font-semibold text-red-600 hover:text-red-700"
-              >
-                {notifications.newOrders} new order
-                {notifications.newOrders > 1 ? "s" : ""}
-              </Link>
-            )}
-
-            {notifications.needsOcr > 0 && (
-              <Link
-                href="/emails?filter=needs_ocr"
-                className="block text-lg font-semibold text-orange-600 hover:text-orange-700"
-              >
-                {notifications.needsOcr} needs OCR
-              </Link>
-            )}
+            <Link
+              href="/orders?filter=new"
+              className="block text-lg font-semibold text-red-600 hover:text-red-700"
+            >
+              {notifications.newOrders} new order
+              {notifications.newOrders > 1 ? "s" : ""}
+            </Link>
           </div>
         )}
 
@@ -194,7 +178,9 @@ export default function Sidebar() {
             <div className="text-sm font-semibold mb-3">Notifications</div>
 
             {feed.length === 0 ? (
-              <div className="text-xs text-gray-500">No new notifications</div>
+              <div className="text-xs text-gray-500">
+                No new notifications
+              </div>
             ) : (
               <div className="space-y-2">
                 {feed.map((item) => (

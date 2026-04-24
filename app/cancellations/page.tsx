@@ -5,16 +5,16 @@ import Link from "next/link";
 import { createClient } from "@supabase/supabase-js";
 import AutoRefresh from "@/components/AutoRefresh";
 
-type EnquiryItem = {
+type CancellationItem = {
   id: string;
   customer: string | null;
+  po_number: string | null;
   sku: string | null;
   quantity: number | null;
   notes: string | null;
   status: string | null;
   email_subject: string | null;
   action: string | null;
-  follow_up_due_at: string | null;
   external_message_id: string | null;
   gmail_message_id: string | null;
 };
@@ -25,19 +25,19 @@ type EmailRow = {
   received_at: string | null;
 };
 
-type GroupedEnquiry = {
+type GroupedCancellation = {
   key: string;
   received_at: string | null;
   customer: string;
-  query: string;
+  po_number: string;
+  notes: string;
   status: string;
-  follow_up_due_at: string | null;
-  items: EnquiryItem[];
+  items: CancellationItem[];
 };
 
-type EnquiriesPageProps = {
+type CancellationsPageProps = {
   searchParams?: Promise<{
-    filter?: string;
+    status?: string;
   }>;
 };
 
@@ -49,124 +49,47 @@ function tabClass(active: boolean) {
   }`;
 }
 
-function getGroupStatus(items: EnquiryItem[]) {
+function getGroupStatus(items: CancellationItem[]) {
   const statuses = items.map((item) => item.status || "Pending");
 
-  if (statuses.some((status) => status === "Follow Up with Customer")) {
-    return "Follow Up with Customer";
-  }
-
-  if (statuses.some((status) => status === "Pending")) {
-    return "Pending";
-  }
-
-  if (statuses.some((status) => status === "Replied")) {
-    return "Replied";
-  }
-
-  if (statuses.every((status) => status === "Close Enquiry")) {
-    return "Close Enquiry";
-  }
+  if (statuses.some((status) => status === "Pending")) return "Pending";
+  if (statuses.some((status) => status === "Approved")) return "Approved";
+  if (statuses.some((status) => status === "Denied")) return "Denied";
 
   return statuses[0] || "Pending";
 }
 
-function getEarliestFollowUp(items: EnquiryItem[]) {
-  const dates = items
-    .map((item) => item.follow_up_due_at)
-    .filter((date): date is string => !!date)
-    .sort((a, b) => new Date(a).getTime() - new Date(b).getTime());
-
-  return dates[0] || null;
-}
-
-function getPriorityMeta(row: GroupedEnquiry) {
-  const now = new Date();
-
-  if (row.status === "Pending") {
-    return {
-      label: "New",
-      style: "bg-purple-100 text-purple-700",
-    };
-  }
-
-  if (row.status === "Follow Up with Customer" && row.follow_up_due_at) {
-    const due = new Date(row.follow_up_due_at);
-    const diffHours =
-      (now.getTime() - due.getTime()) / (1000 * 60 * 60);
-
-    if (diffHours >= 48) {
-      return {
-        label: "Critical",
-        style: "bg-red-100 text-red-700",
-      };
-    }
-
-    if (diffHours >= 0) {
-      return {
-        label: "Overdue",
-        style: "bg-orange-100 text-orange-700",
-      };
-    }
-
-    return {
-      label: "Due Soon",
-      style: "bg-yellow-100 text-yellow-700",
-    };
-  }
-
-  return {
-    label: null as string | null,
-    style: "",
-  };
-}
-
-export default async function EnquiriesPage({
+export default async function CancellationsPage({
   searchParams,
-}: EnquiriesPageProps) {
+}: CancellationsPageProps) {
   const params = await searchParams;
-  const activeFilter = params?.filter || "all";
+  const activeStatus = params?.status || "all";
 
   const supabase = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!
   );
 
-  const nowIso = new Date().toISOString();
-
-  await supabase
-    .from("order_items")
-    .update({
-      status: "Follow Up with Customer",
-    })
-    .eq("status", "Replied")
-    .not("follow_up_due_at", "is", null)
-    .lt("follow_up_due_at", nowIso);
-
   const { data, error } = await supabase
     .from("order_items")
     .select(
-      "id, customer, sku, quantity, notes, status, email_subject, action, follow_up_due_at, external_message_id, gmail_message_id"
+      "id, customer, po_number, sku, quantity, notes, status, email_subject, action, external_message_id, gmail_message_id"
     )
-    .in("action", [
-      "Reply to Enquiry",
-      "Follow Up",
-      "Confirm Delivery",
-    ])
+    .eq("action", "Cancel Order")
     .order("id", { ascending: false });
 
   if (error) {
     return (
       <div className="p-10">
-        <h1 className="text-3xl font-bold mb-6">Enquiries and Follow Up</h1>
+        <h1 className="text-3xl font-bold mb-6">Cancellations</h1>
         <p className="text-red-600">
-          Error loading enquiries: {error.message}
+          Error loading cancellations: {error.message}
         </p>
       </div>
     );
   }
 
-  const items = (data ?? []) as EnquiryItem[];
+  const items = (data ?? []) as CancellationItem[];
 
   const externalIds = Array.from(
     new Set(
@@ -212,7 +135,7 @@ export default async function EnquiriesPage({
     }
   }
 
-  const groupedMap = new Map<string, EnquiryItem[]>();
+  const groupedMap = new Map<string, CancellationItem[]>();
 
   for (const item of items) {
     const key =
@@ -228,53 +151,42 @@ export default async function EnquiriesPage({
     groupedMap.get(key)!.push(item);
   }
 
-  const groupedRows: GroupedEnquiry[] = Array.from(groupedMap.entries()).map(
-    ([key, groupItems]) => {
-      const first = groupItems[0];
+  const groupedRows: GroupedCancellation[] = Array.from(
+    groupedMap.entries()
+  ).map(([key, groupItems]) => {
+    const first = groupItems[0];
 
-      const email =
-        emailMap.get(first.external_message_id || "") ||
-        emailMap.get(first.gmail_message_id || "");
+    const email =
+      emailMap.get(first.external_message_id || "") ||
+      emailMap.get(first.gmail_message_id || "");
 
-      return {
-        key,
-        received_at: email?.received_at || null,
-        customer: first.customer || "",
-        query:
-          groupItems
-            .map((item) => item.notes)
-            .filter(Boolean)
-            .join(" | ") ||
-          first.email_subject ||
-          "",
-        status: getGroupStatus(groupItems),
-        follow_up_due_at: getEarliestFollowUp(groupItems),
-        items: groupItems,
-      };
-    }
-  );
+    return {
+      key,
+      received_at: email?.received_at || null,
+      customer: first.customer || "",
+      po_number: first.po_number || "",
+      notes:
+        groupItems
+          .map((item) => item.notes)
+          .filter(Boolean)
+          .join(" | ") ||
+        first.email_subject ||
+        "",
+      status: getGroupStatus(groupItems),
+      items: groupItems,
+    };
+  });
 
   const counts = {
     all: groupedRows.length,
     pending: groupedRows.filter((row) => row.status === "Pending").length,
-    replied: groupedRows.filter((row) => row.status === "Replied").length,
-    followup: groupedRows.filter(
-      (row) => row.status === "Follow Up with Customer"
-    ).length,
-    closed: groupedRows.filter((row) => row.status === "Close Enquiry").length,
+    approved: groupedRows.filter((row) => row.status === "Approved").length,
+    denied: groupedRows.filter((row) => row.status === "Denied").length,
   };
 
   const filteredRows = groupedRows.filter((row) => {
-    if (activeFilter === "all") return true;
-    if (activeFilter === "pending") return row.status === "Pending";
-    if (activeFilter === "replied") return row.status === "Replied";
-    if (activeFilter === "followup") {
-      return row.status === "Follow Up with Customer";
-    }
-    if (activeFilter === "closed") {
-      return row.status === "Close Enquiry";
-    }
-    return true;
+    if (activeStatus === "all") return true;
+    return row.status.toLowerCase() === activeStatus.toLowerCase();
   });
 
   const sortedRows = [...filteredRows].sort((a, b) => {
@@ -294,19 +206,19 @@ export default async function EnquiriesPage({
 
       <div className="flex items-center justify-between">
         <div className="space-y-3">
-          <h1 className="text-3xl font-bold">Enquiries and Follow Up</h1>
+          <h1 className="text-3xl font-bold">Cancellations</h1>
 
           <div className="flex flex-wrap gap-3">
-            <div className="px-4 py-2 rounded-full bg-orange-100 text-orange-800 text-sm font-medium">
-              {counts.followup} follow up{counts.followup !== 1 ? "s" : ""} due
-            </div>
-
             <div className="px-4 py-2 rounded-full bg-gray-100 text-gray-700 text-sm font-medium">
               {counts.pending} pending
             </div>
 
             <div className="px-4 py-2 rounded-full bg-green-100 text-green-700 text-sm font-medium">
-              {counts.replied} replied
+              {counts.approved} approved
+            </div>
+
+            <div className="px-4 py-2 rounded-full bg-red-100 text-red-700 text-sm font-medium">
+              {counts.denied} denied
             </div>
           </div>
         </div>
@@ -325,43 +237,43 @@ export default async function EnquiriesPage({
           >
             Orders
           </Link>
+
+          <Link
+            href="/enquiries-follow-up"
+            className="px-4 py-2 border rounded-lg hover:bg-gray-50"
+          >
+            Enquiries
+          </Link>
         </div>
       </div>
 
       <div className="flex flex-wrap gap-3">
         <Link
-          href="/enquiries-follow-up?filter=all"
-          className={tabClass(activeFilter === "all")}
+          href="/cancellations?status=all"
+          className={tabClass(activeStatus === "all")}
         >
           All ({counts.all})
         </Link>
 
         <Link
-          href="/enquiries-follow-up?filter=pending"
-          className={tabClass(activeFilter === "pending")}
+          href="/cancellations?status=pending"
+          className={tabClass(activeStatus === "pending")}
         >
           Pending ({counts.pending})
         </Link>
 
         <Link
-          href="/enquiries-follow-up?filter=replied"
-          className={tabClass(activeFilter === "replied")}
+          href="/cancellations?status=approved"
+          className={tabClass(activeStatus === "approved")}
         >
-          Replied ({counts.replied})
+          Approved ({counts.approved})
         </Link>
 
         <Link
-          href="/enquiries-follow-up?filter=followup"
-          className={tabClass(activeFilter === "followup")}
+          href="/cancellations?status=denied"
+          className={tabClass(activeStatus === "denied")}
         >
-          Follow Up ({counts.followup})
-        </Link>
-
-        <Link
-          href="/enquiries-follow-up?filter=closed"
-          className={tabClass(activeFilter === "closed")}
-        >
-          Closed ({counts.closed})
+          Denied ({counts.denied})
         </Link>
       </div>
 
@@ -371,10 +283,10 @@ export default async function EnquiriesPage({
             <tr className="bg-gray-100">
               <th className="p-3 border text-left">Received On</th>
               <th className="p-3 border text-left">Customer</th>
+              <th className="p-3 border text-left">PO Number</th>
               <th className="p-3 border text-left">SKU</th>
-              <th className="p-3 border text-left">Quantity</th>
-              <th className="p-3 border text-left">Query</th>
-              <th className="p-3 border text-left">Priority</th>
+              <th className="p-3 border text-left">Qty</th>
+              <th className="p-3 border text-left">Notes</th>
               <th className="p-3 border text-left">Action</th>
               <th className="p-3 border text-left">Status</th>
             </tr>
@@ -384,13 +296,12 @@ export default async function EnquiriesPage({
             {sortedRows.length === 0 ? (
               <tr>
                 <td colSpan={8} className="p-6 text-center text-gray-500">
-                  No items found
+                  No cancellations found
                 </td>
               </tr>
             ) : (
               sortedRows.map((row) => {
                 const firstItem = row.items[0];
-                const priority = getPriorityMeta(row);
 
                 return (
                   <tr key={row.key} className="hover:bg-gray-50">
@@ -401,6 +312,8 @@ export default async function EnquiriesPage({
                     </td>
 
                     <td className="p-3 border">{row.customer}</td>
+
+                    <td className="p-3 border">{row.po_number}</td>
 
                     <td className="p-3 border">
                       <div className="space-y-1">
@@ -418,32 +331,7 @@ export default async function EnquiriesPage({
                       </div>
                     </td>
 
-                    <td className="p-3 border">
-                      <div className="space-y-2">
-                        <div>{row.query}</div>
-
-                        {row.follow_up_due_at && (
-                          <div className="text-xs text-gray-500">
-                            Follow up:{" "}
-                            {new Date(
-                              row.follow_up_due_at
-                            ).toLocaleString()}
-                          </div>
-                        )}
-                      </div>
-                    </td>
-
-                    <td className="p-3 border">
-                      {priority.label ? (
-                        <span
-                          className={`px-2 py-1 text-xs rounded ${priority.style}`}
-                        >
-                          {priority.label}
-                        </span>
-                      ) : (
-                        ""
-                      )}
-                    </td>
+                    <td className="p-3 border">{row.notes}</td>
 
                     <td className="p-3 border">
                       <Link
@@ -455,11 +343,14 @@ export default async function EnquiriesPage({
                     </td>
 
                     <td className="p-3 border">
-                      <form action="/api/enquiries/update-status" method="POST">
+                      <form
+                        action="/api/cancellations/update-status"
+                        method="POST"
+                      >
                         <input
                           type="hidden"
-                          name="id"
-                          value={firstItem.id}
+                          name="external_message_id"
+                          value={row.key}
                         />
 
                         <select
@@ -467,12 +358,9 @@ export default async function EnquiriesPage({
                           defaultValue={row.status || "Pending"}
                           className="border rounded px-2 py-1 bg-white"
                         >
-                          <option value="Replied">Replied</option>
                           <option value="Pending">Pending</option>
-                          <option value="Follow Up with Customer">
-                            Follow Up with Customer
-                          </option>
-                          <option value="Close Enquiry">Close Enquiry</option>
+                          <option value="Approved">Approved</option>
+                          <option value="Denied">Denied</option>
                         </select>
 
                         <button className="ml-2 px-2 py-1 bg-gray-200 rounded hover:bg-gray-300">
