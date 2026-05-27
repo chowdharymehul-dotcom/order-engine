@@ -1,1494 +1,473 @@
-export const dynamic = "force-dynamic";
-
-import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { NextResponse } from "next/server";
 import OpenAI from "openai";
-import { google } from "googleapis";
-import { uploadAttachmentToSupabase } from "@/lib/attachment-storage";
-import { getAppBaseUrl } from "@/lib/ocr";
+import { createClient } from "@supabase/supabase-js";
 
-type AttachmentCategory = "pdf" | "text" | "document" | "image" | "other";
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY!,
+});
 
-type SelectedAttachment = {
-  filename: string;
-  mimeType: string;
-  buffer: Buffer;
-  source: "gmail" | "outlook";
-  category: AttachmentCategory;
-  score: number;
-};
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!
+);
 
-const MAX_OCR_ATTEMPTS = 3;
-
-function decodeBase64Url(data: string) {
-  return Buffer.from(data.replace(/-/g, "+").replace(/_/g, "/"), "base64");
-}
-
-function extractPlainText(payload: any): string {
-  if (!payload) return "";
-
-  if (payload.mimeType === "text/plain" && payload.body?.data) {
-    return decodeBase64Url(payload.body.data).toString("utf-8");
-  }
-
-  if (payload.parts && Array.isArray(payload.parts)) {
-    for (const part of payload.parts) {
-      const text = extractPlainText(part);
-      if (text) return text;
-    }
-  }
-
-  return "";
-}
-
-function collectAllParts(payload: any, allParts: any[] = []) {
-  if (!payload) return allParts;
-
-  allParts.push(payload);
-
-  if (payload.parts && Array.isArray(payload.parts)) {
-    for (const part of payload.parts) {
-      collectAllParts(part, allParts);
-    }
-  }
-
-  return allParts;
-}
-
-function stripHtml(html: string) {
-  return html
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/p>/gi, "\n")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/g, " ")
+function cleanText(value: string) {
+  return value
     .replace(/\s+/g, " ")
+    .replace(/\u0000/g, "")
     .trim();
 }
 
-function getLatestConnectionPerProvider(connections: any[]) {
-  const latestMap = new Map<string, any>();
-
-  for (const connection of connections) {
-    const provider = connection.provider;
-    const current = latestMap.get(provider);
-
-    const connectionTime = new Date(
-      connection.created_at || connection.updated_at || 0
-    ).getTime();
-
-    if (!current) {
-      latestMap.set(provider, connection);
-      continue;
-    }
-
-    const currentTime = new Date(
-      current.created_at || current.updated_at || 0
-    ).getTime();
-
-    if (connectionTime > currentTime) {
-      latestMap.set(provider, connection);
-    }
-  }
-
-  return Array.from(latestMap.values());
-}
-
-function isTokenExpiredError(message: string) {
-  const lower = message.toLowerCase();
-  return (
-    lower.includes("token is expired") ||
-    lower.includes("lifetime validation failed") ||
-    lower.includes("invalid_grant") ||
-    lower.includes("expired")
-  );
-}
-
-async function markConnectionExpired(
-  supabaseAdmin: any,
-  connectionId: string,
-  errorMessage: string
-) {
-  const { error } = await supabaseAdmin
-    .from("inbox_connections")
-    .update({
-      connection_status: "expired",
-      last_error: errorMessage,
-    })
-    .eq("id", connectionId);
-
-  if (error) {
-    console.error("❌ Failed to mark connection expired:", error.message);
-  }
-}
-
-async function markConnectionActive(supabaseAdmin: any, connectionId: string) {
-  const { error } = await supabaseAdmin
-    .from("inbox_connections")
-    .update({
-      connection_status: "active",
-      last_error: null,
-    })
-    .eq("id", connectionId);
-
-  if (error) {
-    console.error("❌ Failed to mark connection active:", error.message);
-  }
-}
-
-async function refreshOutlookToken(connection: any, supabaseAdmin: any) {
-  const res = await fetch(
-    "https://login.microsoftonline.com/common/oauth2/v2.0/token",
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body: new URLSearchParams({
-        client_id: process.env.OUTLOOK_CLIENT_ID!,
-        client_secret: process.env.OUTLOOK_CLIENT_SECRET!,
-        grant_type: "refresh_token",
-        refresh_token: connection.refresh_token,
-      }),
-    }
-  );
-
-  const data = await res.json();
-
-  if (!res.ok) {
-    throw new Error(data.error_description || data.error || "Refresh failed");
-  }
-
-  const newAccessToken = data.access_token;
-  const newRefreshToken = data.refresh_token || connection.refresh_token;
-  const expiresAt = new Date(Date.now() + data.expires_in * 1000).toISOString();
-
-  const { error } = await supabaseAdmin
-    .from("inbox_connections")
-    .update({
-      access_token: newAccessToken,
-      refresh_token: newRefreshToken,
-      expires_at: expiresAt,
-      connection_status: "active",
-      last_error: null,
-    })
-    .eq("id", connection.id);
-
-  if (error) {
-    throw new Error(`Failed to save refreshed token: ${error.message}`);
-  }
-
-  return newAccessToken;
-}
-
-function normalizeFilename(filename: string) {
-  return (filename || "").trim().toLowerCase();
-}
-
-function isInlineOrSignatureLike(filename: string, mimeType: string) {
-  const lower = normalizeFilename(filename);
-  const lowerMime = (mimeType || "").toLowerCase();
-
-  return (
-    lower.includes("image001") ||
-    lower.includes("image002") ||
-    lower.includes("logo") ||
-    lower.includes("signature") ||
-    lower.includes("sig") ||
-    lower.includes("banner") ||
-    lower.includes("facebook") ||
-    lower.includes("instagram") ||
-    lower.includes("linkedin") ||
-    lower.includes("twitter") ||
-    lower.includes("whatsapp") ||
-    lowerMime.startsWith("image/")
-  );
-}
-
-function isSkippableGmailPart(filename: string, mimeType: string) {
-  const lowerFilename = normalizeFilename(filename);
-  const lowerMime = (mimeType || "").toLowerCase();
-
-  if (lowerMime.startsWith("multipart/")) return true;
-
-  return (
-    lowerFilename.includes("multipart") ||
-    lowerFilename.startsWith("unnamed") ||
-    lowerFilename === "attachment"
-  );
-}
-
-function getAttachmentCategory(
-  filename: string,
-  mimeType: string
-): AttachmentCategory {
-  const lower = normalizeFilename(filename);
-  const lowerMime = (mimeType || "").toLowerCase();
-
-  if (lower.endsWith(".pdf") || lowerMime === "application/pdf") return "pdf";
-
-  if (
-    lower.endsWith(".txt") ||
-    lower.endsWith(".csv") ||
-    lowerMime === "text/plain" ||
-    lowerMime === "text/csv" ||
-    lowerMime.startsWith("text/")
-  ) {
-    return "text";
-  }
-
-  if (
-    lower.endsWith(".doc") ||
-    lower.endsWith(".docx") ||
-    lower.endsWith(".xls") ||
-    lower.endsWith(".xlsx") ||
-    lower.endsWith(".rtf") ||
-    lower.endsWith(".xml") ||
-    lower.endsWith(".json") ||
-    lowerMime.includes("word") ||
-    lowerMime.includes("excel") ||
-    lowerMime.includes("spreadsheet") ||
-    lowerMime.includes("officedocument")
-  ) {
-    return "document";
-  }
-
-  if (lowerMime.startsWith("image/")) return "image";
-
-  return "other";
-}
-
-function getAttachmentScore(filename: string, mimeType: string, size: number) {
-  const lower = normalizeFilename(filename);
-  const category = getAttachmentCategory(filename, mimeType);
-
-  if (isInlineOrSignatureLike(filename, mimeType)) return -1000;
-
-  let score = 0;
-
-  if (category === "pdf") score += 1000;
-  if (category === "text") score += 700;
-  if (category === "document") score += 600;
-  if (category === "other") score += 50;
-  if (category === "image") score -= 200;
-
-  if (
-    lower.includes("po") ||
-    lower.includes("pedido") ||
-    lower.includes("purchase") ||
-    lower.includes("order") ||
-    lower.includes("invoice") ||
-    lower.includes("packing") ||
-    lower.includes("proforma")
-  ) {
-    score += 120;
-  }
-
-  if (size > 5_000) score += 20;
-  if (size > 20_000) score += 20;
-  if (size > 50_000) score += 20;
-
-  return score;
-}
-
-function chooseBestAttachment(attachments: SelectedAttachment[]) {
-  if (!attachments.length) return null;
-  return [...attachments].sort((a, b) => b.score - a.score)[0];
-}
-
-function isBusinessRelevantPdf(params: {
-  filename?: string;
-  subject?: string;
-  bodyText?: string;
-}) {
-  const text = `${params.filename || ""} ${params.subject || ""} ${
-    params.bodyText || ""
-  }`.toLowerCase();
-
-  const positiveSignals = [
-    "proforma",
-    "invoice",
-    "order confirmation",
-    "purchase order",
-    "purchase",
-    "po ",
-    " po",
-    "pedido",
-    "order",
-    "shipment instruction",
-    "balance payment",
-    "goods ready",
-    "ready goods",
-    "agent",
-    "quantity",
-    "sku",
-    "style no",
-    "style",
-    "ref.",
-    "ref :",
-    "mail dtd",
-    "payment",
-  ];
-
-  const negativeSignals = [
-    "bank statement",
-    "statement",
-    "certificate of origin",
-    "certificate",
-    "credit card",
-    "travel",
-    "hotel",
-    "newsletter",
-    "webinar",
-    "invitation",
-    "invitation to attend",
-    "market compliance",
-    "payment received",
-    "refund",
-    "gst refund",
-  ];
-
-  const hasPositive = positiveSignals.some((signal) => text.includes(signal));
-  const hasNegative = negativeSignals.some((signal) => text.includes(signal));
-
-  return hasPositive && !hasNegative;
-}
-
-async function extractGmailAttachments(
-  gmail: any,
-  provider: string,
-  messageId: string,
-  payload: any
-) {
-  const allParts = collectAllParts(payload, []);
-  let combinedText = "";
-  const attachmentNames: string[] = [];
-  const candidateAttachments: SelectedAttachment[] = [];
-
-  for (const part of allParts) {
-    const filename = part.filename || "";
-    const attachmentId = part.body?.attachmentId;
-    const mimeType = part.mimeType || "";
-
-    if (!attachmentId && !filename) continue;
-    if (isSkippableGmailPart(filename, mimeType)) continue;
-
-    const safeFilename = filename || `file-${Date.now()}`;
-    attachmentNames.push(safeFilename);
-
-    let buffer: Buffer | null = null;
-
-    if (part.body?.data) {
-      try {
-        buffer = decodeBase64Url(part.body.data);
-      } catch {
-        buffer = null;
-      }
-    } else if (attachmentId) {
-      try {
-        const attachmentRes = await gmail.users.messages.attachments.get({
-          userId: "me",
-          messageId,
-          id: attachmentId,
-        });
-
-        const rawData = attachmentRes.data.data;
-        if (rawData) buffer = decodeBase64Url(rawData);
-      } catch (error) {
-        console.error("Gmail attachment fetch failed:", safeFilename, error);
-      }
-    }
-
-    if (!buffer || !buffer.length) continue;
-
-    const category = getAttachmentCategory(safeFilename, mimeType);
-
-    if (category === "text") {
-      combinedText += buffer.toString("utf-8") + "\n\n";
-    }
-
-    candidateAttachments.push({
-      filename: safeFilename,
-      mimeType: mimeType || "application/octet-stream",
-      buffer,
-      source: "gmail",
-      category,
-      score: getAttachmentScore(safeFilename, mimeType, buffer.length),
-    });
-  }
-
-  const bestAttachment = chooseBestAttachment(candidateAttachments);
-
-  let attachmentUrl = "";
-  let selectedAttachmentName = "";
-  let selectedAttachmentMimeType = "";
-  let selectedAttachmentType = "";
-
-  if (bestAttachment && bestAttachment.score > 0) {
-    try {
-      const uploaded = await uploadAttachmentToSupabase({
-        provider,
-        messageId,
-        filename: bestAttachment.filename,
-        fileBuffer: bestAttachment.buffer,
-        mimeType: bestAttachment.mimeType,
-      });
-
-      attachmentUrl = uploaded.publicUrl;
-      selectedAttachmentName = bestAttachment.filename;
-      selectedAttachmentMimeType = bestAttachment.mimeType;
-      selectedAttachmentType = bestAttachment.category;
-    } catch (error) {
-      console.error(
-        "Gmail selected attachment upload failed:",
-        bestAttachment.filename,
-        error
-      );
-    }
-  }
-
-  return {
-    attachmentText: combinedText.trim(),
-    attachmentNames,
-    attachmentUrl,
-    selectedAttachmentName,
-    selectedAttachmentMimeType,
-    selectedAttachmentType,
-    hasPdfAttachment: selectedAttachmentType === "pdf",
-  };
-}
-
-async function extractOutlookAttachments(
-  provider: string,
-  accessToken: string,
-  messageId: string
-) {
-  let combinedText = "";
-  const attachmentNames: string[] = [];
-  const candidateAttachments: SelectedAttachment[] = [];
-
-  const listRes = await fetch(
-    `https://graph.microsoft.com/v1.0/me/messages/${messageId}/attachments`,
-    {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-      },
-      cache: "no-store",
-    }
-  );
-
-  if (!listRes.ok) {
-    return {
-      attachmentText: "",
-      attachmentNames: [],
-      attachmentUrl: "",
-      selectedAttachmentName: "",
-      selectedAttachmentMimeType: "",
-      selectedAttachmentType: "",
-      hasPdfAttachment: false,
-    };
-  }
-
-  const data = await listRes.json();
-  const attachments = data.value || [];
-
-  for (const attachment of attachments) {
-    const odataType = attachment["@odata.type"] || "";
-    const isFileAttachment = odataType.includes("fileAttachment");
-    if (!isFileAttachment) continue;
-
-    const name = attachment.name || "attachment.bin";
-    const contentType = attachment.contentType || "application/octet-stream";
-    const contentBytes = attachment.contentBytes;
-    const isInline =
-      attachment.isInline === true ||
-      !!attachment.contentId ||
-      !!attachment.contentLocation;
-
-    attachmentNames.push(name);
-
-    if (isInline) continue;
-    if (isInlineOrSignatureLike(name, contentType)) continue;
-    if (!contentBytes) continue;
-
-    try {
-      const buffer = Buffer.from(contentBytes, "base64");
-      if (!buffer.length) continue;
-
-      const category = getAttachmentCategory(name, contentType);
-
-      if (category === "text") {
-        combinedText += buffer.toString("utf-8") + "\n\n";
-      }
-
-      candidateAttachments.push({
-        filename: name,
-        mimeType: contentType,
-        buffer,
-        source: "outlook",
-        category,
-        score: getAttachmentScore(name, contentType, buffer.length),
-      });
-    } catch (error) {
-      console.error("Outlook attachment decode failed:", name, error);
-    }
-  }
-
-  const bestAttachment = chooseBestAttachment(candidateAttachments);
-
-  let attachmentUrl = "";
-  let selectedAttachmentName = "";
-  let selectedAttachmentMimeType = "";
-  let selectedAttachmentType = "";
-
-  if (bestAttachment && bestAttachment.score > 0) {
-    try {
-      const uploaded = await uploadAttachmentToSupabase({
-        provider,
-        messageId,
-        filename: bestAttachment.filename,
-        fileBuffer: bestAttachment.buffer,
-        mimeType: bestAttachment.mimeType,
-      });
-
-      attachmentUrl = uploaded.publicUrl;
-      selectedAttachmentName = bestAttachment.filename;
-      selectedAttachmentMimeType = bestAttachment.mimeType;
-      selectedAttachmentType = bestAttachment.category;
-    } catch (error) {
-      console.error(
-        "Outlook selected attachment upload failed:",
-        bestAttachment.filename,
-        error
-      );
-    }
-  }
-
-  return {
-    attachmentText: combinedText.trim(),
-    attachmentNames,
-    attachmentUrl,
-    selectedAttachmentName,
-    selectedAttachmentMimeType,
-    selectedAttachmentType,
-    hasPdfAttachment: selectedAttachmentType === "pdf",
-  };
-}
-
-async function runBodyOnlyFallback(params: {
-  supabaseAdmin: any;
-  openai: OpenAI;
-  provider: string;
-  externalMessageId: string;
-  subject: string;
-  from: string;
-  bodyText: string;
-  processedResults: any[];
-  ignored: any[];
-}) {
-  const {
-    supabaseAdmin,
-    openai,
-    provider,
-    externalMessageId,
-    subject,
-    from,
-    bodyText,
-    processedResults,
-    ignored,
-  } = params;
-
-  const combinedInput = `
-Subject: ${subject}
-From: ${from}
-
-EMAIL BODY:
-${bodyText}
-
-NOTE:
-OCR failed or was unavailable.
-Use ONLY the email body.
-Do NOT assume PDF content.
-`;
-
-  const relevanceResponse = await openai.chat.completions.create({
-    model: "gpt-4.1-mini",
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content: `
-Classify whether this email is relevant for business workflow processing.
-
-Relevant means the email contains one or more of:
+// --------------------
+// STRICT RELEVANCE GATE
+// --------------------
+async function classifyEmail(content: string) {
+  const prompt = `
+You are a strict business email classifier.
+
+Your job is to classify emails into ONLY ONE category.
+
+CATEGORIES:
+
+1. ORDER
+ONLY if:
+- clear purchase intent
 - order placement
-- product enquiry
-- delivery enquiry
-- follow up on products/orders
-- cancellation request
+- PO shared
+- SKU + quantity requested
+- production/shipping request
+
+2. ENQUIRY
+ONLY if:
+- asking questions
+- follow up
+- checking status
+- asking for confirmation
 - delivery confirmation
-- PO / purchase order / SKU / quantity style business instructions
+- shipment confirmation
+- payment clarification
+- availability checks
 
-Return JSON only:
-{
-  "is_relevant": true,
-  "reason": ""
-}
-`,
-      },
-      {
-        role: "user",
-        content: combinedInput,
-      },
-    ],
-  });
+3. CANCELLATION
+ONLY if:
+- cancel order
+- stop shipment
+- modify/remove order
 
-  let relevanceParsed: any = { is_relevant: false, reason: "parse_failed" };
-
-  try {
-    relevanceParsed = JSON.parse(
-      relevanceResponse.choices[0]?.message?.content || "{}"
-    );
-  } catch {
-    relevanceParsed = { is_relevant: false, reason: "parse_failed" };
-  }
-
-  if (!relevanceParsed.is_relevant) {
-    ignored.push({
-      provider,
-      external_message_id: externalMessageId,
-      subject,
-      reason: relevanceParsed.reason || "ocr_failed_body_fallback_not_relevant",
-    });
-
-    await supabaseAdmin
-      .from("emails")
-      .update({
-        processing_status: "ignored",
-        processed_at: new Date().toISOString(),
-        last_processing_error: "OCR failed + fallback ignored",
-      })
-      .eq("provider", provider)
-      .eq("external_message_id", externalMessageId);
-
-    return;
-  }
-
-  const aiResponse = await openai.chat.completions.create({
-    model: "gpt-4.1",
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content: `
-Extract structured business actions using ONLY email body content.
-
-Return JSON:
-{
-  "customer": "",
-  "po_number": "",
-  "items": [
-    {
-      "action": "",
-      "sku": "",
-      "quantity": 0,
-      "notes": ""
-    }
-  ]
-}
-
-Rules:
-- Do NOT assume PDF content.
-- OCR/PDF text is unavailable.
-- Extract multiple SKUs as separate items only if explicitly present in email body.
-- Valid actions: Place Order, Reply to Enquiry, Follow Up, Cancel Order, Confirm Delivery
-- NEVER create an item with blank SKU.
-- NEVER create a Place Order item unless SKU is explicitly present in email body.
-- If body only says PO/PDF is attached but does not include SKU/order lines, return empty items.
-`,
-      },
-      {
-        role: "user",
-        content: combinedInput,
-      },
-    ],
-  });
-
-  let parsed: any = { customer: "", po_number: "", items: [] };
-
-  try {
-    parsed = JSON.parse(aiResponse.choices[0]?.message?.content || "{}");
-  } catch {
-    parsed = { customer: "", po_number: "", items: [] };
-  }
-
-  if (!parsed.items || !Array.isArray(parsed.items) || parsed.items.length === 0) {
-    await supabaseAdmin
-      .from("emails")
-      .update({
-        processing_status: "processed",
-        processed_at: new Date().toISOString(),
-        last_processing_error: "OCR failed + fallback no body-only items",
-      })
-      .eq("provider", provider)
-      .eq("external_message_id", externalMessageId);
-
-    return;
-  }
-
-  for (const item of parsed.items) {
-    if (!item.sku) continue;
-
-    await supabaseAdmin.from("order_items").insert({
-      provider,
-      action: item.action || "Reply to Enquiry",
-      customer: parsed.customer || "",
-      po_number: parsed.po_number || "",
-      sku: item.sku,
-      quantity: item.quantity || null,
-      notes: item.notes || "Created via OCR fallback using email body only.",
-      status: "New",
-      source_email: from,
-      gmail_message_id: externalMessageId,
-      external_message_id: externalMessageId,
-      email_subject: subject,
-    });
-
-    processedResults.push({
-      provider,
-      external_message_id: externalMessageId,
-      subject,
-      sku: item.sku,
-      action: item.action || "Reply to Enquiry",
-    });
-  }
-
-  await supabaseAdmin
-    .from("emails")
-    .update({
-      processing_status: "processed",
-      processed_at: new Date().toISOString(),
-      last_processing_error: "OCR failed + fallback used",
-    })
-    .eq("provider", provider)
-    .eq("external_message_id", externalMessageId);
-}
-
-async function processOneMessage({
-  supabaseAdmin,
-  openai,
-  provider,
-  externalMessageId,
-  externalThreadId,
-  subject,
-  from,
-  bodyText,
-  attachmentText,
-  attachmentNames,
-  attachmentUrl,
-  hasPdfAttachment,
-  selectedAttachmentName,
-  selectedAttachmentMimeType,
-  selectedAttachmentType,
-  receivedAt,
-  existingEmail,
-  processedResults,
-  needsOcr,
-  ignored,
-  debug,
-}: any) {
-  const existingAttachmentText = existingEmail?.attachment_text || "";
-  const finalAttachmentText = attachmentText || existingAttachmentText || "";
-
-  const finalAttachmentUrl =
-    attachmentUrl || existingEmail?.attachment_url || null;
-
-  const finalAttachmentName =
-    selectedAttachmentName || existingEmail?.attachment_name || "";
-
-  const finalAttachmentMimeType =
-    selectedAttachmentMimeType || existingEmail?.attachment_mime_type || "";
-
-  const finalAttachmentType =
-    selectedAttachmentType || existingEmail?.attachment_type || "";
-
-  const isRelevantPdf =
-    finalAttachmentType === "pdf" &&
-    isBusinessRelevantPdf({
-      filename: finalAttachmentName,
-      subject,
-      bodyText,
-    });
-
-  const existingStatus = existingEmail?.processing_status || "";
-  const hasUsableExtractedText = finalAttachmentText.trim().length > 0;
-  const ocrAttempts = Number(existingEmail?.ocr_attempts || 0);
-
-  const isTerminalOcrState =
-    existingStatus === "ocr_failed" ||
-    existingStatus === "ocr_blocked" ||
-    (existingStatus === "needs_ocr" && ocrAttempts >= MAX_OCR_ATTEMPTS);
-
-  const shouldSendPdfToOcr =
-    isRelevantPdf && !hasUsableExtractedText && !isTerminalOcrState;
-
-  let nextStatus = existingStatus || "new";
-
-  if (hasUsableExtractedText) {
-    if (existingStatus === "processed" || existingStatus === "ignored") {
-      nextStatus = existingStatus;
-    } else {
-      nextStatus = "ready_for_ai";
-    }
-  } else if (shouldSendPdfToOcr) {
-    nextStatus = "needs_ocr";
-  } else if (isTerminalOcrState) {
-    nextStatus = existingStatus || "ocr_failed";
-  } else if (!existingStatus) {
-    nextStatus = "new";
-  }
-
-  const emailPayload = {
-    provider,
-    gmail_message_id: externalMessageId,
-    external_message_id: externalMessageId,
-    external_thread_id: externalThreadId || null,
-    subject,
-    from_email: from,
-    body_text: bodyText,
-    attachment_text: finalAttachmentText,
-    attachment_url: finalAttachmentUrl,
-    attachment_name: finalAttachmentName || null,
-    attachment_mime_type: finalAttachmentMimeType || null,
-    attachment_type: finalAttachmentType || null,
-    received_at: receivedAt,
-    processing_status: nextStatus,
-  };
-
-  if (!existingEmail) {
-    const { error: saveEmailError } = await supabaseAdmin
-      .from("emails")
-      .insert(emailPayload);
-
-    if (saveEmailError) {
-      console.error("❌ Failed to insert email:", saveEmailError.message);
-      return;
-    }
-  } else {
-    const { error: updateEmailError } = await supabaseAdmin
-      .from("emails")
-      .update(emailPayload)
-      .eq("provider", provider)
-      .eq("external_message_id", externalMessageId);
-
-    if (updateEmailError) {
-      console.error("❌ Failed to update email:", updateEmailError.message);
-      return;
-    }
-  }
-
-  debug.push({
-    provider,
-    external_message_id: externalMessageId,
-    subject,
-    from,
-    hasAttachment: attachmentNames.length > 0,
-    hasPdfAttachment,
-    businessRelevantPdf: isRelevantPdf,
-    existingStatus,
-    hasUsableExtractedText,
-    ocrAttempts,
-    isTerminalOcrState,
-    shouldSendPdfToOcr,
-    nextStatus,
-    attachmentNames,
-    selectedAttachmentName: finalAttachmentName,
-    selectedAttachmentMimeType: finalAttachmentMimeType,
-    selectedAttachmentType: finalAttachmentType,
-    attachmentUrl: finalAttachmentUrl,
-    bodyPreview: (bodyText || "").slice(0, 200),
-    attachmentPreview: (finalAttachmentText || "").slice(0, 300),
-  });
-
-  if (shouldSendPdfToOcr) {
-    needsOcr.push({
-      provider,
-      external_message_id: externalMessageId,
-      subject,
-      attachmentNames,
-      selectedAttachmentName: finalAttachmentName,
-      selectedAttachmentMimeType: finalAttachmentMimeType,
-      selectedAttachmentType: finalAttachmentType,
-      attachmentUrl: finalAttachmentUrl,
-    });
-    return;
-  }
-
-  if (isTerminalOcrState && !hasUsableExtractedText) {
-    await runBodyOnlyFallback({
-      supabaseAdmin,
-      openai,
-      provider,
-      externalMessageId,
-      subject,
-      from,
-      bodyText,
-      processedResults,
-      ignored,
-    });
-
-    return;
-  }
-
-  const combinedInput = `
-Subject: ${subject}
-From: ${from}
-
-EMAIL BODY:
-${bodyText}
-
-ATTACHMENT CONTENT:
-${finalAttachmentText}
-`;
-
-  const relevanceResponse = await openai.chat.completions.create({
-    model: "gpt-4.1-mini",
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content: `
-Classify whether this email is relevant for business workflow processing.
-
-Relevant means the email contains one or more of:
-- order placement
-- product enquiry
-- delivery enquiry
-- follow up on products/orders
-- cancellation request
-- delivery confirmation
-- PO / purchase order / SKU / quantity style business instructions
-
-Not relevant means things like:
-- travel
-- airlines
-- hotels
+4. IGNORE
+Everything else:
+- marketing
 - newsletters
-- banking
-- service center / repairs
-- personal messages
-- marketing emails
-- general non-product operational emails
+- spam
+- OTP
+- ads
+- notifications
+- signatures only
+- irrelevant conversations
+- social mails
+- generic greetings
+- empty content
 
-Return JSON only:
-{
-  "is_relevant": true,
-  "reason": ""
-}
-`,
-      },
+VERY IMPORTANT:
+- "confirm delivery" = ENQUIRY
+- No SKU + no purchase intent = NOT ORDER
+- unclear emails = IGNORE
+- promotional emails = IGNORE
+- recruitment emails = IGNORE
+- calendar/invite mails = IGNORE
+
+RETURN ONLY ONE WORD:
+ORDER
+ENQUIRY
+CANCELLATION
+IGNORE
+
+EMAIL:
+${content}
+`;
+
+  const res = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    temperature: 0,
+    messages: [
       {
         role: "user",
-        content: combinedInput,
+        content: prompt,
       },
     ],
   });
 
-  let relevanceParsed: any = { is_relevant: false, reason: "" };
+  return (
+    res.choices[0]?.message?.content
+      ?.trim()
+      ?.toUpperCase() || "IGNORE"
+  );
+}
 
-  try {
-    relevanceParsed = JSON.parse(
-      relevanceResponse.choices[0]?.message?.content || "{}"
-    );
-  } catch {
-    relevanceParsed = { is_relevant: false, reason: "parse_failed" };
-  }
+// --------------------
+// EXTRACTION
+// --------------------
+async function extractStructured(content: string) {
+  const prompt = `
+Extract structured business order/enquiry data.
 
-  if (!relevanceParsed.is_relevant) {
-    ignored.push({
-      provider,
-      external_message_id: externalMessageId,
-      subject,
-      reason: relevanceParsed.reason || "not_relevant",
-    });
+Return STRICT JSON ONLY.
 
-    await supabaseAdmin
-      .from("emails")
-      .update({
-        processing_status: "ignored",
-        processed_at: new Date().toISOString(),
-      })
-      .eq("provider", provider)
-      .eq("external_message_id", externalMessageId);
-
-    return;
-  }
-
-  const aiResponse = await openai.chat.completions.create({
-    model: "gpt-4.1",
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content: `
-Extract structured business actions.
-
-Return JSON:
 {
   "customer": "",
   "po_number": "",
   "items": [
     {
-      "action": "",
       "sku": "",
-      "quantity": 0,
-      "notes": ""
+      "qty": 0
     }
-  ]
+  ],
+  "notes": "",
+  "priority": "low",
+  "follow_up_date": ""
 }
 
-Rules:
-- Extract multiple SKUs as separate items
-- Use both email body and attachment content
-- Valid actions: Place Order, Reply to Enquiry, Follow Up, Cancel Order, Confirm Delivery
-- NEVER create an item with blank SKU
-- NEVER create a Place Order item unless SKU is explicitly present in email body or attachment content
-- If attachment exists but no readable order lines are available, do NOT guess order items
-- If there is no actionable order/enquiry content, return:
-{
-  "customer": "",
-  "po_number": "",
-  "items": []
-}
-`,
-      },
+RULES:
+- quantity must be numeric
+- if missing -> 0
+- if no sku -> empty items array
+- no hallucination
+- no fake values
+- leave blank if unclear
+
+EMAIL:
+${content}
+`;
+
+  const res = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    temperature: 0,
+    response_format: {
+      type: "json_object",
+    },
+    messages: [
       {
         role: "user",
-        content: combinedInput,
+        content: prompt,
       },
     ],
   });
 
-  let parsed: any = { customer: "", po_number: "", items: [] };
-
-  try {
-    parsed = JSON.parse(aiResponse.choices[0]?.message?.content || "{}");
-  } catch {
-    parsed = { customer: "", po_number: "", items: [] };
-  }
-
-  if (!parsed.items || !Array.isArray(parsed.items) || parsed.items.length === 0) {
-    await supabaseAdmin
-      .from("emails")
-      .update({
-        processing_status: "processed",
-        processed_at: new Date().toISOString(),
-      })
-      .eq("provider", provider)
-      .eq("external_message_id", externalMessageId);
-
-    return;
-  }
-
-  for (const item of parsed.items) {
-    if (!item.sku) continue;
-
-    await supabaseAdmin.from("order_items").insert({
-      provider,
-      action: item.action,
-      customer: parsed.customer || "",
-      po_number: parsed.po_number || "",
-      sku: item.sku,
-      quantity: item.quantity || null,
-      notes: item.notes || "",
-      status: "New",
-      source_email: from,
-      gmail_message_id: externalMessageId,
-      external_message_id: externalMessageId,
-      email_subject: subject,
-    });
-
-    processedResults.push({
-      provider,
-      external_message_id: externalMessageId,
-      subject,
-      sku: item.sku,
-      action: item.action,
-    });
-  }
-
-  await supabaseAdmin
-    .from("emails")
-    .update({
-      processing_status: "processed",
-      processed_at: new Date().toISOString(),
-    })
-    .eq("provider", provider)
-    .eq("external_message_id", externalMessageId);
+  return JSON.parse(
+    res.choices[0]?.message?.content || "{}"
+  );
 }
 
-export async function GET(req: NextRequest) {
-  console.log("🚀 process-emails route invoked");
-  console.log("🔐 Has authorization header:", !!req.headers.get("authorization"));
-
+// --------------------
+// OCR FALLBACK
+// --------------------
+async function extractFromAttachment(fileUrl: string) {
   try {
-    const supabaseAdmin = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.SUPABASE_SERVICE_ROLE_KEY!
-    );
-
-    const openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY!,
+    const res = await openai.chat.completions.create({
+      model: "gpt-4.1-mini",
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: "Extract all readable business/order text from this document.",
+            },
+            {
+              type: "image_url",
+              image_url: {
+                url: fileUrl,
+              },
+            },
+          ],
+        },
+      ],
     });
 
-    const { data: allConnections, error: connectionError } = await supabaseAdmin
-      .from("inbox_connections")
+    return res.choices[0]?.message?.content || "";
+  } catch (err) {
+    console.error("OCR fallback failed", err);
+    return "";
+  }
+}
+
+// --------------------
+// MAIN HANDLER
+// --------------------
+export async function GET() {
+  try {
+    const { data: emails, error } = await supabase
+      .from("emails")
       .select("*")
-      .in("provider", ["gmail", "outlook"])
-      .order("created_at", { ascending: false });
+      .eq("processed", false)
+      .order("received_at", { ascending: true });
 
-    if (connectionError) {
-      return NextResponse.json(
-        { error: connectionError.message },
-        { status: 500 }
-      );
+    if (error) {
+      return NextResponse.json({
+        ok: false,
+        error: error.message,
+      });
     }
 
-    if (!allConnections || allConnections.length === 0) {
-      return NextResponse.json(
-        { error: "No inbox connections found" },
-        { status: 404 }
-      );
-    }
-
-    const connections = getLatestConnectionPerProvider(allConnections);
-
-    console.log(
-      "📦 Using latest connections only:",
-      connections.map((c) => ({
-        id: c.id,
-        provider: c.provider,
-        created_at: c.created_at,
-        connection_status: c.connection_status,
-        expires_at: c.expires_at,
-      }))
-    );
-
-    const processedResults: any[] = [];
-    const needsOcr: any[] = [];
-    const skipped: any[] = [];
-    const ignored: any[] = [];
-    const debug: any[] = [];
-    const providerErrors: any[] = [];
-
-    for (const connection of connections) {
+    for (const email of emails || []) {
       try {
-        if (connection.provider === "gmail") {
-          const oauth2Client = new google.auth.OAuth2(
-            process.env.GOOGLE_CLIENT_ID,
-            process.env.GOOGLE_CLIENT_SECRET,
-            process.env.GOOGLE_REDIRECT_URI
-          );
+        const externalId =
+          email.external_message_id ||
+          email.gmail_message_id ||
+          email.id;
 
-          oauth2Client.setCredentials({
-            access_token: connection.access_token,
-            refresh_token: connection.refresh_token,
-          });
-
-          const gmail = google.gmail({ version: "v1", auth: oauth2Client });
-
-          const listRes = await gmail.users.messages.list({
-            userId: "me",
-            maxResults: 20,
-            q: "newer_than:2d",
-          });
-
-          await markConnectionActive(supabaseAdmin, connection.id);
-
-          const messages = listRes.data.messages || [];
-
-          console.log("📩 Gmail messages found:", messages.length);
-
-          for (const msg of messages) {
-            const externalMessageId = msg.id!;
-            const externalThreadId = msg.threadId || null;
-
-            const { data: existingEmail } = await supabaseAdmin
-              .from("emails")
-              .select("*")
-              .eq("provider", "gmail")
-              .eq("external_message_id", externalMessageId)
-              .limit(1)
-              .maybeSingle();
-
-            if (
-              existingEmail &&
-              (existingEmail.processing_status === "processed" ||
-                existingEmail.processing_status === "ignored")
-            ) {
-              skipped.push({
-                provider: "gmail",
-                external_message_id: externalMessageId,
-                reason: "already_processed",
-              });
-              continue;
-            }
-
-            const msgRes = await gmail.users.messages.get({
-              userId: "me",
-              id: externalMessageId,
-              format: "full",
-            });
-
-            const payload = msgRes.data.payload;
-            const headers = payload?.headers || [];
-
-            const subject =
-              headers.find((h: any) => h.name === "Subject")?.value || "";
-            const from =
-              headers.find((h: any) => h.name === "From")?.value || "";
-            const dateHeader =
-              headers.find((h: any) => h.name === "Date")?.value || "";
-
-            const bodyText =
-              extractPlainText(payload) || msgRes.data.snippet || "";
-
-            const {
-              attachmentText,
-              attachmentNames,
-              hasPdfAttachment,
-              attachmentUrl,
-              selectedAttachmentName,
-              selectedAttachmentMimeType,
-              selectedAttachmentType,
-            } = await extractGmailAttachments(
-              gmail,
-              "gmail",
-              externalMessageId,
-              payload
-            );
-
-            await processOneMessage({
-              supabaseAdmin,
-              openai,
-              provider: "gmail",
-              externalMessageId,
-              externalThreadId,
-              subject,
-              from,
-              bodyText,
-              attachmentText,
-              attachmentNames,
-              attachmentUrl,
-              hasPdfAttachment,
-              selectedAttachmentName,
-              selectedAttachmentMimeType,
-              selectedAttachmentType,
-              receivedAt: dateHeader
-                ? new Date(dateHeader).toISOString()
-                : new Date().toISOString(),
-              existingEmail,
-              processedResults,
-              needsOcr,
-              ignored,
-              debug,
-            });
-          }
-        }
-
-        if (connection.provider === "outlook") {
-          let accessToken = connection.access_token;
-
-          if (
-            connection.expires_at &&
-            new Date(connection.expires_at).getTime() < Date.now()
-          ) {
-            console.log("🔄 Refreshing Outlook token...");
-            accessToken = await refreshOutlookToken(connection, supabaseAdmin);
-          }
-
-          const listRes = await fetch(
-            "https://graph.microsoft.com/v1.0/me/messages?$top=20&$select=id,conversationId,subject,from,receivedDateTime,bodyPreview,body,hasAttachments",
-            {
-              headers: {
-                Authorization: `Bearer ${accessToken}`,
-              },
-              cache: "no-store",
-            }
-          );
-
-          const raw = await listRes.text();
-
-          let data: any = null;
-
-          try {
-            data = JSON.parse(raw);
-          } catch {
-            data = { value: [] };
-          }
-
-          if (!listRes.ok) {
-            throw new Error(
-              data?.error?.message || raw || "Outlook fetch failed"
-            );
-          }
-
-          await markConnectionActive(supabaseAdmin, connection.id);
-
-          const messages = data.value || [];
-
-          console.log("📩 Outlook messages found:", messages.length);
-
-          for (const msg of messages) {
-            const externalMessageId = msg.id;
-            const externalThreadId = msg.conversationId || null;
-
-            const { data: existingEmail } = await supabaseAdmin
-              .from("emails")
-              .select("*")
-              .eq("provider", "outlook")
-              .eq("external_message_id", externalMessageId)
-              .limit(1)
-              .maybeSingle();
-
-            if (
-              existingEmail &&
-              (existingEmail.processing_status === "processed" ||
-                existingEmail.processing_status === "ignored")
-            ) {
-              skipped.push({
-                provider: "outlook",
-                external_message_id: externalMessageId,
-                reason: "already_processed",
-              });
-              continue;
-            }
-
-            const subject = msg.subject || "";
-            const from = msg.from?.emailAddress?.address || "";
-            const receivedAt = msg.receivedDateTime || new Date().toISOString();
-            const rawBody = msg.body?.content || msg.bodyPreview || "";
-            const bodyText = stripHtml(rawBody);
-
-            const {
-              attachmentText,
-              attachmentNames,
-              hasPdfAttachment,
-              attachmentUrl,
-              selectedAttachmentName,
-              selectedAttachmentMimeType,
-              selectedAttachmentType,
-            } = await extractOutlookAttachments(
-              "outlook",
-              accessToken,
-              externalMessageId
-            );
-
-            await processOneMessage({
-              supabaseAdmin,
-              openai,
-              provider: "outlook",
-              externalMessageId,
-              externalThreadId,
-              subject,
-              from,
-              bodyText,
-              attachmentText,
-              attachmentNames,
-              attachmentUrl,
-              hasPdfAttachment,
-              selectedAttachmentName,
-              selectedAttachmentMimeType,
-              selectedAttachmentType,
-              receivedAt,
-              existingEmail,
-              processedResults,
-              needsOcr,
-              ignored,
-              debug,
-            });
-          }
-        }
-      } catch (providerError: any) {
-        console.error(
-          `❌ Provider ${connection.provider} failed:`,
-          providerError.message
+        // --------------------
+        // COMBINE CONTENT
+        // --------------------
+        let content = cleanText(
+          email.body_text ||
+            email.body ||
+            ""
         );
 
-        const errorMessage = providerError.message || "Unknown provider error";
+        if (email.attachment_text) {
+          content += "\n\n" + cleanText(email.attachment_text);
+        }
 
-        if (isTokenExpiredError(errorMessage)) {
-          await markConnectionExpired(supabaseAdmin, connection.id, errorMessage);
-        } else {
-          await supabaseAdmin
-            .from("inbox_connections")
+        // OCR fallback
+        if (
+          !email.attachment_text &&
+          email.attachment_url
+        ) {
+          const extracted = await extractFromAttachment(
+            email.attachment_url
+          );
+
+          if (extracted?.trim()) {
+            content += "\n\n" + extracted;
+
+            await supabase
+              .from("emails")
+              .update({
+                attachment_text: extracted,
+              })
+              .eq("id", email.id);
+          }
+        }
+
+        // --------------------
+        // HARD CONTENT FILTER
+        // --------------------
+        if (
+          !content ||
+          content.length < 10
+        ) {
+          await supabase
+            .from("emails")
             .update({
-              last_error: errorMessage,
+              processed: true,
+              processing_status: "ignored",
+              intent: "ignored",
             })
-            .eq("id", connection.id);
+            .eq("id", email.id);
+
+          continue;
         }
 
-        providerErrors.push({
-          provider: connection.provider,
-          connection_id: connection.id,
-          connection_status: isTokenExpiredError(errorMessage)
-            ? "expired"
-            : connection.connection_status || "active",
-          message: errorMessage,
-        });
+        // --------------------
+        // CLASSIFY
+        // --------------------
+        const intent = await classifyEmail(content);
 
-        continue;
-      }
-    }
+        // --------------------
+        // IGNORE IRRELEVANT
+        // --------------------
+        if (
+          intent === "IGNORE" ||
+          !["ORDER", "ENQUIRY", "CANCELLATION"].includes(intent)
+        ) {
+          await supabase
+            .from("emails")
+            .update({
+              processed: true,
+              processing_status: "ignored",
+              intent: "ignored",
+            })
+            .eq("id", email.id);
 
-    let autoOcrTriggered = false;
-    let autoOcrStatus: number | null = null;
-    let autoOcrResult: any = null;
-
-    if (needsOcr.length > 0) {
-      try {
-        const appBaseUrl = getAppBaseUrl();
-
-        const ocrRes = await fetch(`${appBaseUrl}/api/process-ocr`, {
-          method: "GET",
-          cache: "no-store",
-        });
-
-        autoOcrTriggered = true;
-        autoOcrStatus = ocrRes.status;
-
-        try {
-          autoOcrResult = await ocrRes.json();
-        } catch {
-          autoOcrResult = null;
+          continue;
         }
-      } catch (error: any) {
-        autoOcrTriggered = true;
-        autoOcrStatus = 500;
-        autoOcrResult = {
-          ok: false,
-          step: "auto_trigger_process_ocr",
-          error: error?.message || "Unknown OCR trigger error",
-        };
+
+        // --------------------
+        // EXTRACT
+        // --------------------
+        const structured =
+          await extractStructured(content);
+
+        const items = Array.isArray(structured.items)
+          ? structured.items
+          : [];
+
+        // --------------------
+        // EXTRA ORDER SAFETY
+        // --------------------
+        if (
+          intent === "ORDER" &&
+          items.length === 0
+        ) {
+          await supabase
+            .from("emails")
+            .update({
+              processed: true,
+              processing_status: "ignored",
+              intent: "ignored",
+            })
+            .eq("id", email.id);
+
+          continue;
+        }
+
+        // --------------------
+        // SAVE EMAIL
+        // --------------------
+        await supabase
+          .from("emails")
+          .update({
+            processed: true,
+            processing_status: "processed",
+            intent: intent.toLowerCase(),
+          })
+          .eq("id", email.id);
+
+        // --------------------
+        // PREVENT DUPLICATES
+        // --------------------
+        const { data: existing } = await supabase
+          .from("order_items")
+          .select("id")
+          .eq("external_message_id", externalId)
+          .limit(1);
+
+        if (existing && existing.length > 0) {
+          continue;
+        }
+
+        // --------------------
+        // CREATE ITEMS
+        // --------------------
+        if (intent === "ORDER") {
+          for (const item of items) {
+            await supabase
+              .from("order_items")
+              .insert({
+                action: "Place Order",
+                customer:
+                  structured.customer || "",
+                po_number:
+                  structured.po_number || "",
+                sku: item.sku || "",
+                quantity: Number(item.qty || 0),
+                notes:
+                  structured.notes || "",
+                status: "New",
+                external_message_id: externalId,
+                gmail_message_id:
+                  email.gmail_message_id || null,
+                email_subject:
+                  email.subject || "",
+              });
+          }
+        }
+
+        if (intent === "ENQUIRY") {
+          await supabase
+            .from("order_items")
+            .insert({
+              action: "Reply to Enquiry",
+              customer:
+                structured.customer || "",
+              po_number:
+                structured.po_number || "",
+              sku:
+                items
+                  .map((i: any) => i.sku)
+                  .filter(Boolean)
+                  .join(", ") || "",
+              quantity:
+                items.reduce(
+                  (sum: number, i: any) =>
+                    sum + Number(i.qty || 0),
+                  0
+                ) || 0,
+              notes:
+                structured.notes ||
+                email.subject ||
+                "",
+              status: "Pending",
+              external_message_id: externalId,
+              gmail_message_id:
+                email.gmail_message_id || null,
+              email_subject:
+                email.subject || "",
+            });
+        }
+
+        if (intent === "CANCELLATION") {
+          await supabase
+            .from("order_items")
+            .insert({
+              action: "Cancel Order",
+              customer:
+                structured.customer || "",
+              po_number:
+                structured.po_number || "",
+              sku:
+                items
+                  .map((i: any) => i.sku)
+                  .filter(Boolean)
+                  .join(", ") || "",
+              quantity:
+                items.reduce(
+                  (sum: number, i: any) =>
+                    sum + Number(i.qty || 0),
+                  0
+                ) || 0,
+              notes:
+                structured.notes || "",
+              status: "Pending",
+              external_message_id: externalId,
+              gmail_message_id:
+                email.gmail_message_id || null,
+              email_subject:
+                email.subject || "",
+            });
+        }
+      } catch (emailErr) {
+        console.error(
+          "Failed processing email",
+          email.id,
+          emailErr
+        );
+
+        await supabase
+          .from("emails")
+          .update({
+            processing_status: "failed",
+            last_processing_error: String(emailErr),
+          })
+          .eq("id", email.id);
       }
     }
 
     return NextResponse.json({
-      processed: processedResults.length,
-      skipped,
-      needsOcr,
-      ignored,
-      results: processedResults,
-      debug,
-      providerErrors,
-      autoOcrTriggered,
-      autoOcrStatus,
-      autoOcrResult,
+      ok: true,
     });
-  } catch (error: any) {
-    console.error("❌ ERROR:", error.message);
+  } catch (err: any) {
+    console.error(err);
 
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json(
+      {
+        ok: false,
+        error: err.message,
+      },
+      {
+        status: 500,
+      }
+    );
   }
 }

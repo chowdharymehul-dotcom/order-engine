@@ -20,6 +20,7 @@ type EnquiryItem = {
 };
 
 type EmailRow = {
+  id: string;
   external_message_id: string | null;
   gmail_message_id: string | null;
   received_at: string | null;
@@ -27,6 +28,7 @@ type EmailRow = {
 
 type GroupedEnquiry = {
   key: string;
+  email_id: string | null;
   received_at: string | null;
   customer: string;
   query: string;
@@ -189,7 +191,7 @@ export default async function EnquiriesPage({
   if (externalIds.length > 0) {
     const { data: emailRows } = await supabase
       .from("emails")
-      .select("external_message_id, gmail_message_id, received_at")
+      .select("id, external_message_id, gmail_message_id, received_at")
       .in("external_message_id", externalIds);
 
     for (const email of (emailRows ?? []) as EmailRow[]) {
@@ -202,7 +204,7 @@ export default async function EnquiriesPage({
   if (gmailIds.length > 0) {
     const { data: gmailEmailRows } = await supabase
       .from("emails")
-      .select("external_message_id, gmail_message_id, received_at")
+      .select("id, external_message_id, gmail_message_id, received_at")
       .in("gmail_message_id", gmailIds);
 
     for (const email of (gmailEmailRows ?? []) as EmailRow[]) {
@@ -238,6 +240,7 @@ export default async function EnquiriesPage({
 
       return {
         key,
+        email_id: email?.id || null,
         received_at: email?.received_at || null,
         customer: first.customer || "",
         query:
@@ -324,6 +327,13 @@ export default async function EnquiriesPage({
             className="px-4 py-2 border rounded-lg hover:bg-gray-50"
           >
             Orders
+          </Link>
+
+          <Link
+            href="/cancellations"
+            className="px-4 py-2 border rounded-lg hover:bg-gray-50"
+          >
+            Cancellations
           </Link>
         </div>
       </div>
@@ -446,12 +456,51 @@ export default async function EnquiriesPage({
                     </td>
 
                     <td className="p-3 border">
-                      <Link
-                        href={`/enquiries-follow-up/${firstItem.id}/reply`}
-                        className="px-4 py-2 rounded-lg text-sm bg-gray-200 text-black hover:bg-gray-300"
-                      >
-                        Reply
-                      </Link>
+                      <div className="flex flex-col gap-2">
+                        <Link
+                          href={`/enquiries-follow-up/${firstItem.id}/reply`}
+                          className="px-4 py-2 rounded-lg text-sm bg-gray-200 text-black hover:bg-gray-300 text-center"
+                        >
+                          Reply
+                        </Link>
+
+                        {row.email_id ? (
+                          <Link
+                            href={`/emails/${row.email_id}`}
+                            className="px-4 py-2 rounded-lg text-sm bg-blue-100 text-blue-700 hover:bg-blue-200 text-center"
+                          >
+                            Original Email
+                          </Link>
+                        ) : (
+                          <span className="px-4 py-2 rounded-lg text-sm bg-gray-100 text-gray-400 text-center">
+                            Original Email
+                          </span>
+                        )}
+
+                        <form action="/api/entries/delete" method="POST">
+                          <input
+                            type="hidden"
+                            name="entry_key"
+                            value={row.key}
+                          />
+
+                          <input
+                            type="hidden"
+                            name="action"
+                            value="Reply to Enquiry"
+                          />
+
+                          <input
+                            type="hidden"
+                            name="redirect_to"
+                            value="/enquiries-follow-up"
+                          />
+
+                          <button className="w-full px-4 py-2 rounded-lg text-sm bg-red-100 text-red-700 hover:bg-red-200">
+                            Delete
+                          </button>
+                        </form>
+                      </div>
                     </td>
 
                     <td className="p-3 border">
@@ -472,7 +521,9 @@ export default async function EnquiriesPage({
                           <option value="Follow Up with Customer">
                             Follow Up with Customer
                           </option>
-                          <option value="Close Enquiry">Close Enquiry</option>
+                          <option value="Close Enquiry">
+                            Close Enquiry
+                          </option>
                         </select>
 
                         <button className="ml-2 px-2 py-1 bg-gray-200 rounded hover:bg-gray-300">
