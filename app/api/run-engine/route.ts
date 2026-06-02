@@ -1,4 +1,5 @@
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 import { NextRequest, NextResponse } from "next/server";
 import { getAppBaseUrl } from "@/lib/ocr";
@@ -27,6 +28,19 @@ async function safeJson(res: Response) {
   }
 }
 
+async function callRoute(appBaseUrl: string, route: string) {
+  const res = await fetch(`${appBaseUrl}${route}`, {
+    method: "GET",
+    cache: "no-store",
+  });
+
+  return {
+    route,
+    status: res.status,
+    result: await safeJson(res),
+  };
+}
+
 export async function GET(req: NextRequest) {
   try {
     if (!isAuthorized(req)) {
@@ -43,40 +57,28 @@ export async function GET(req: NextRequest) {
 
     const appBaseUrl = getAppBaseUrl();
 
-    const processEmailsRes1 = await fetch(`${appBaseUrl}/api/process-emails`, {
-      method: "GET",
-      cache: "no-store",
-    });
-    const processEmailsJson1 = await safeJson(processEmailsRes1);
+    const gmailFetch = await callRoute(appBaseUrl, "/api/gmail/fetch");
 
-    const processOcrRes = await fetch(`${appBaseUrl}/api/process-ocr`, {
-      method: "GET",
-      cache: "no-store",
-    });
-    const processOcrJson = await safeJson(processOcrRes);
+    const processEmailsPass1 = await callRoute(
+      appBaseUrl,
+      "/api/process-emails"
+    );
 
-    const processEmailsRes2 = await fetch(`${appBaseUrl}/api/process-emails`, {
-      method: "GET",
-      cache: "no-store",
-    });
-    const processEmailsJson2 = await safeJson(processEmailsRes2);
+    const processOcr = await callRoute(appBaseUrl, "/api/process-ocr");
+
+    const processEmailsPass2 = await callRoute(
+      appBaseUrl,
+      "/api/process-emails"
+    );
 
     return NextResponse.json({
       ok: true,
       engine: "run-engine",
       appBaseUrl,
-      processEmailsPass1: {
-        status: processEmailsRes1.status,
-        result: processEmailsJson1,
-      },
-      processOcr: {
-        status: processOcrRes.status,
-        result: processOcrJson,
-      },
-      processEmailsPass2: {
-        status: processEmailsRes2.status,
-        result: processEmailsJson2,
-      },
+      gmailFetch,
+      processEmailsPass1,
+      processOcr,
+      processEmailsPass2,
     });
   } catch (error: any) {
     return NextResponse.json(

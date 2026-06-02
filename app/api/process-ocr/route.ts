@@ -1,53 +1,63 @@
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import OpenAI from "openai";
 import { extractTextFromPdfWithCloudConvert } from "@/lib/cloudconvert-ocr";
 import { getAppBaseUrl } from "@/lib/ocr";
 
-const MAX_OCR_ATTEMPTS = 3;
+const MAX_OCR_ATTEMPTS = 5;
 
-function getHexPreview(buffer: Buffer, length = 16) {
-  return buffer.subarray(0, length).toString("hex");
-}
+type OcrResult = {
+  text: string;
+  method: string;
+  jobId?: string | null;
+  strategy?: string | null;
+  directTextLength?: number | null;
+  ocrTextLength?: number | null;
+};
 
-function getAsciiPreview(buffer: Buffer, length = 32) {
-  return buffer
-    .subarray(0, length)
-    .toString("utf8")
-    .replace(/[^\x20-\x7E]/g, ".");
+function getErrorMessage(error: unknown) {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  return "Unknown OCR error";
 }
 
 function looksLikePdf(buffer: Buffer) {
-  if (!buffer || buffer.length < 5) return false;
-  return buffer.subarray(0, 5).toString("utf8") === "%PDF-";
+  return (
+    buffer.length >= 5 &&
+    buffer.subarray(0, 5).toString("utf8") === "%PDF-"
+  );
 }
 
-function getErrorMessage(err: unknown) {
-  if (err instanceof Error) return err.message;
-  if (typeof err === "string") return err;
-  return "Unknown OCR processing error";
+function isTextLike(filename: string | null, contentType: string | null) {
+  const lowerName = (filename || "").toLowerCase();
+  const lowerType = (contentType || "").toLowerCase();
+
+  return (
+    lowerType.startsWith("text/") ||
+    lowerName.endsWith(".txt") ||
+    lowerName.endsWith(".csv") ||
+    lowerName.endsWith(".json") ||
+    lowerName.endsWith(".xml")
+  );
 }
 
-function extractStructuredError(errorMessage: string) {
-  try {
-    return JSON.parse(errorMessage);
-  } catch {
-    return null;
-  }
+function isImageLike(filename: string | null, contentType: string | null) {
+  const lowerName = (filename || "").toLowerCase();
+  const lowerType = (contentType || "").toLowerCase();
+
+  return (
+    lowerType.startsWith("image/") ||
+    lowerName.endsWith(".png") ||
+    lowerName.endsWith(".jpg") ||
+    lowerName.endsWith(".jpeg") ||
+    lowerName.endsWith(".webp")
+  );
 }
 
 function isCreditsExceeded(errorMessage: string) {
-  const structured = extractStructuredError(errorMessage);
-
-  if (
-    structured?.error?.code === "CREDITS_EXCEEDED" ||
-    structured?.code === "CREDITS_EXCEEDED"
-  ) {
-    return true;
-  }
-
   const lower = errorMessage.toLowerCase();
 
   return (
@@ -57,282 +67,168 @@ function isCreditsExceeded(errorMessage: string) {
   );
 }
 
-async function markEmailOcrState(params: {
+function getAsciiPreview(buffer: Buffer, length = 120) {
+  return buffer
+    .subarray(0, length)
+    .toString("utf8")
+    .replace(/[^\x20-\x7E]/g, ".");
+}
+
+function getHexPreview(buffer: Buffer, length = 24) {
+  return buffer.subarray(0, length).toString("hex");
+}
+
+async function extractTextFromImageWithOpenAI(params: {
+  openai: OpenAI;
+  attachmentUrl: string;
+  filename: string;
+}) {
+  const { openai, attachmentUrl, filename } = params;
+
+  const response = await openai.chat.completions.create({
+    model: "gpt-4.1-mini",
+    messages: [
+      {
+        role: "system",
+        content:
+          "You extract readable business text from images. Return only extracted text. Do not add explanations.",
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: `Extract all readable text from this attachment: ${filename}`,
+          },
+          {
+            type: "image_url",
+            image_url: {
+              url: attachmentUrl,
+            },
+          },
+        ],
+      },
+    ],
+  });
+
+  return response.choices[0]?.message?.content?.trim() || "";
+}
+
+async function extractTextFromAttachment(params: {
+  openai: OpenAI;
+  attachmentUrl: string;
+  filename: string;
+  contentType: string | null;
+  buffer: Buffer;
+}) {
+  const { openai, attachmentUrl, filename, contentType, buffer } = params;
+
+  if (looksLikePdf(buffer)) {
+    const result = await extractTextFromPdfWithCloudConvert(
+      buffer,
+      filename || "attachment.pdf"
+    );
+
+    return {
+      text: result.text?.trim() || "",
+      method: "cloudconvert_pdf",
+      jobId: result.jobId || null,
+      strategy: result.strategy || null,
+      directTextLength: result.directTextLength || 0,
+      ocrTextLength: result.ocrTextLength || 0,
+    } satisfies OcrResult;
+  }
+
+  if (isTextLike(filename, contentType)) {
+    return {
+      text: buffer.toString("utf8").trim(),
+      method: "direct_text",
+      jobId: null,
+      strategy: "direct_text",
+      directTextLength: buffer.length,
+      ocrTextLength: 0,
+    } satisfies OcrResult;
+  }
+
+  if (isImageLike(filename, contentType)) {
+    const text = await extractTextFromImageWithOpenAI({
+      openai,
+      attachmentUrl,
+      filename,
+    });
+
+    return {
+      text,
+      method: "openai_image_vision",
+      jobId: null,
+      strategy: "image_vision",
+      directTextLength: 0,
+      ocrTextLength: text.length,
+    } satisfies OcrResult;
+  }
+
+  throw new Error(
+    JSON.stringify({
+      step: "unsupported_attachment_type",
+      error: "Attachment is not PDF, text, or image-readable",
+      filename,
+      contentType,
+      downloadedBytes: buffer.length,
+      hexPreview: getHexPreview(buffer),
+      asciiPreview: getAsciiPreview(buffer),
+    })
+  );
+}
+
+async function markEmail(params: {
   supabase: any;
   emailId: string;
-  status: "ocr_failed" | "ocr_blocked" | "ready_for_ai" | "processed" | "ignored";
-  errorMessage?: string | null;
+  processingStatus: string;
   attachmentText?: string | null;
+  errorMessage?: string | null;
   incrementAttempts?: boolean;
 }) {
   const {
     supabase,
     emailId,
-    status,
-    errorMessage = null,
+    processingStatus,
     attachmentText = null,
+    errorMessage = null,
     incrementAttempts = false,
   } = params;
 
-  const { data: existingRow } = await supabase
+  const { data: existing } = await supabase
     .from("emails")
     .select("ocr_attempts")
     .eq("id", emailId)
     .maybeSingle();
 
-  const currentAttempts = Number(existingRow?.ocr_attempts || 0);
+  const currentAttempts = Number(existing?.ocr_attempts || 0);
   const nextAttempts = incrementAttempts ? currentAttempts + 1 : currentAttempts;
 
-  const updatePayload: Record<string, any> = {
-    processing_status: status,
+  const payload: Record<string, any> = {
+    processing_status: processingStatus,
     last_processing_error: errorMessage,
     ocr_attempts: nextAttempts,
   };
 
-  if (status === "processed" || status === "ignored") {
-    updatePayload.processed_at = new Date().toISOString();
-  }
-
   if (attachmentText !== null) {
-    updatePayload.attachment_text = attachmentText;
+    payload.attachment_text = attachmentText;
   }
 
   const { error } = await supabase
     .from("emails")
-    .update(updatePayload)
+    .update(payload)
     .eq("id", emailId);
 
   if (error) {
-    throw new Error(`Failed to update OCR state: ${error.message}`);
+    throw new Error(`Failed to update email OCR state: ${error.message}`);
   }
 
   return nextAttempts;
 }
 
-async function fallbackToAiUsingEmailBody(params: {
-  supabase: any;
-  openai: OpenAI;
-  email: any;
-  ocrErrorMessage: string;
-}) {
-  const { supabase, openai, email, ocrErrorMessage } = params;
-
-  const combinedInput = `
-Subject: ${email.subject || ""}
-From: ${email.from_email || ""}
-
-EMAIL BODY:
-${email.body_text || ""}
-
-ATTACHMENT CONTENT:
-OCR was unavailable because CloudConvert credits were exhausted.
-Do not invent details from the PDF.
-Use only the email body content.
-`;
-
-  const relevanceResponse = await openai.chat.completions.create({
-    model: "gpt-4.1-mini",
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content: `
-Classify whether this email is relevant for business workflow processing.
-
-Relevant means the email contains one or more of:
-- order placement
-- product enquiry
-- delivery enquiry
-- follow up on products/orders
-- cancellation request
-- delivery confirmation
-- PO / purchase order / SKU / quantity style business instructions
-
-Not relevant means things like:
-- travel
-- airlines
-- hotels
-- newsletters
-- banking
-- service center / repairs
-- personal messages
-- marketing emails
-- general non-product operational emails
-
-Return JSON only:
-{
-  "is_relevant": true,
-  "reason": ""
-}
-`,
-      },
-      {
-        role: "user",
-        content: combinedInput,
-      },
-    ],
-  });
-
-  const relevanceRaw =
-    relevanceResponse.choices[0]?.message?.content || '{"is_relevant":false}';
-
-  let relevanceParsed: any = {
-    is_relevant: false,
-    reason: "No relevance response",
-  };
-
-  try {
-    relevanceParsed = JSON.parse(relevanceRaw);
-  } catch {
-    relevanceParsed = {
-      is_relevant: false,
-      reason: "Relevance JSON parse failed",
-    };
-  }
-
-  if (!relevanceParsed.is_relevant) {
-    const attempts = await markEmailOcrState({
-      supabase,
-      emailId: email.id,
-      status: "ignored",
-      errorMessage: `OCR blocked, fallback AI ignored email. OCR error: ${ocrErrorMessage}. Reason: ${
-        relevanceParsed.reason || "not_relevant"
-      }`,
-      incrementAttempts: true,
-    });
-
-    return {
-      fallbackUsed: true,
-      fallbackStatus: "ignored",
-      fallbackReason: relevanceParsed.reason || "not_relevant",
-      createdItems: [],
-      ocrAttempts: attempts,
-    };
-  }
-
-  const aiResponse = await openai.chat.completions.create({
-    model: "gpt-4.1",
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content: `
-Extract structured business actions.
-
-Return JSON:
-{
-  "customer": "",
-  "po_number": "",
-  "items": [
-    {
-      "action": "",
-      "sku": "",
-      "quantity": 0,
-      "notes": ""
-    }
-  ]
-}
-
-Rules:
-- Use ONLY the email body content.
-- OCR/PDF text is unavailable. Do NOT invent details from the PDF.
-- Extract multiple SKUs as separate items only if explicitly present in the email body.
-- Valid actions: Place Order, Reply to Enquiry, Follow Up, Cancel Order, Confirm Delivery
-- NEVER create an item with blank SKU.
-- NEVER create a Place Order item unless SKU is explicitly present in the email body.
-- If the email only says a PDF/PO is attached but the body does not include SKU/order details, return an empty items array.
-- If there is no actionable order/enquiry content, return:
-{
-  "customer": "",
-  "po_number": "",
-  "items": []
-}
-`,
-      },
-      {
-        role: "user",
-        content: combinedInput,
-      },
-    ],
-  });
-
-  const raw = aiResponse.choices[0]?.message?.content || "{}";
-
-  let parsed: any = {};
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    parsed = { customer: "", po_number: "", items: [] };
-  }
-
-  const createdItems: any[] = [];
-
-  if (!parsed.items || !Array.isArray(parsed.items) || parsed.items.length === 0) {
-    const attempts = await markEmailOcrState({
-      supabase,
-      emailId: email.id,
-      status: "processed",
-      errorMessage: `OCR blocked, fallback AI ran but found no extractable items. OCR error: ${ocrErrorMessage}`,
-      incrementAttempts: true,
-    });
-
-    return {
-      fallbackUsed: true,
-      fallbackStatus: "processed",
-      fallbackReason: "No extractable body-only items",
-      createdItems,
-      ocrAttempts: attempts,
-    };
-  }
-
-  for (const item of parsed.items) {
-    if (!item.sku) continue;
-
-    const payload = {
-      provider: email.provider || "",
-      action: item.action || "Reply to Enquiry",
-      customer: parsed.customer || "",
-      po_number: parsed.po_number || "",
-      sku: item.sku,
-      quantity: item.quantity || null,
-      notes: item.notes || "Created by OCR fallback using email body only.",
-      status: "New",
-      source_email: email.from_email || "",
-      gmail_message_id: email.external_message_id || email.gmail_message_id || "",
-      external_message_id: email.external_message_id || email.gmail_message_id || "",
-      email_subject: email.subject || "",
-    };
-
-    const { error: insertError } = await supabase
-      .from("order_items")
-      .insert(payload);
-
-    if (!insertError) {
-      createdItems.push({
-        sku: payload.sku,
-        action: payload.action,
-      });
-    }
-  }
-
-  const attempts = await markEmailOcrState({
-    supabase,
-    emailId: email.id,
-    status: "processed",
-    errorMessage: `OCR blocked, fallback AI processed using email body only. OCR error: ${ocrErrorMessage}`,
-    incrementAttempts: true,
-  });
-
-  return {
-    fallbackUsed: true,
-    fallbackStatus: "processed",
-    fallbackReason: "Body-only fallback completed",
-    createdItems,
-    ocrAttempts: attempts,
-  };
-}
-
-export async function GET() {
+export async function GET(req: NextRequest) {
   const supabase = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!
@@ -343,69 +239,76 @@ export async function GET() {
   });
 
   try {
-    const { data: emails, error } = await supabase
+    const emailId = req.nextUrl.searchParams.get("emailId");
+    const force = req.nextUrl.searchParams.get("force") === "true";
+
+    let query = supabase
       .from("emails")
       .select("*")
-      .eq("processing_status", "needs_ocr")
       .not("attachment_url", "is", null)
       .order("received_at", { ascending: false })
-      .limit(10);
+      .limit(emailId ? 1 : 10);
+
+    if (emailId) {
+      query = query.eq("id", emailId);
+    }
+
+    const { data: rows, error } = await query;
 
     if (error) {
       return NextResponse.json(
         {
           ok: false,
-          step: "load_email_queue",
+          step: "load_ocr_candidates",
           error: error.message,
         },
         { status: 500 }
       );
     }
 
-    if (!emails || emails.length === 0) {
+    const emails = (rows || []).filter((email: any) => {
+      const hasText = !!String(email.attachment_text || "").trim();
+      const attempts = Number(email.ocr_attempts || 0);
+      const status = email.processing_status || "";
+
+      if (force) return true;
+      if (hasText) return false;
+      if (status === "processed" || status === "ignored") return false;
+      if (attempts >= MAX_OCR_ATTEMPTS && !emailId) return false;
+
+      return true;
+    });
+
+    if (emails.length === 0) {
       return NextResponse.json({
         ok: true,
-        message: "No OCR-ready emails found",
+        message: "No OCR-ready attachments found",
+        checkedRows: rows?.length || 0,
+        hint:
+          "If testing one email, use /api/process-ocr?emailId=EMAIL_UUID&force=true",
       });
     }
 
-    const skippedRows: any[] = [];
+    const results: any[] = [];
 
     for (const email of emails) {
       const currentAttempts = Number(email.ocr_attempts || 0);
 
-      if (currentAttempts >= MAX_OCR_ATTEMPTS) {
-        skippedRows.push({
-          emailId: email.id,
-          subject: email.subject,
-          reason: "max_ocr_attempts_reached",
-          ocrAttempts: currentAttempts,
-        });
-
-        await markEmailOcrState({
+      if (!force && currentAttempts >= MAX_OCR_ATTEMPTS) {
+        const attempts = await markEmail({
           supabase,
           emailId: email.id,
-          status: "ocr_failed",
+          processingStatus: "ocr_failed",
           errorMessage: `Max OCR attempts reached (${MAX_OCR_ATTEMPTS})`,
           incrementAttempts: false,
         });
 
-        continue;
-      }
-
-      if (!email.attachment_url) {
-        await markEmailOcrState({
-          supabase,
-          emailId: email.id,
-          status: "ocr_failed",
-          errorMessage: "Missing attachment_url",
-          incrementAttempts: true,
-        });
-
-        skippedRows.push({
+        results.push({
+          ok: false,
           emailId: email.id,
           subject: email.subject,
-          reason: "missing_attachment_url",
+          step: "max_attempts",
+          ocrAttempts: attempts,
         });
 
         continue;
@@ -421,16 +324,13 @@ export async function GET() {
         const contentLength = fileRes.headers.get("content-length");
 
         if (!fileRes.ok) {
-          const responsePreview = await fileRes.text().catch(() => "");
-
           throw new Error(
             JSON.stringify({
               step: "download_attachment",
               error: "Failed to download attachment",
               status: fileRes.status,
-              responseContentType: contentType,
-              responseContentLength: contentLength,
-              responsePreview: responsePreview.slice(0, 500),
+              contentType,
+              contentLength,
               attachmentUrl: email.attachment_url,
             })
           );
@@ -442,157 +342,119 @@ export async function GET() {
           throw new Error(
             JSON.stringify({
               step: "download_attachment",
-              error: "Downloaded attachment buffer is empty",
-              responseContentType: contentType,
-              responseContentLength: contentLength,
+              error: "Downloaded attachment was empty",
+              contentType,
+              contentLength,
               attachmentUrl: email.attachment_url,
             })
           );
         }
 
-        const hexPreview = getHexPreview(buffer, 24);
-        const asciiPreview = getAsciiPreview(buffer, 80);
+        const filename =
+          email.attachment_name ||
+          email.subject ||
+          `attachment-${email.id}.pdf`;
 
-        if (!looksLikePdf(buffer)) {
-          const attempts = await markEmailOcrState({
-            supabase,
-            emailId: email.id,
-            status: "ocr_failed",
-            errorMessage: JSON.stringify({
-              step: "validate_pdf_signature",
-              error: "Downloaded attachment is not a valid PDF signature",
-              responseContentType: contentType,
-              responseContentLength: contentLength,
-              downloadedBytes: buffer.length,
-              hexPreview,
-              asciiPreview,
-              attachmentUrl: email.attachment_url,
-            }),
-            incrementAttempts: true,
-          });
-
-          skippedRows.push({
-            emailId: email.id,
-            subject: email.subject,
-            reason: "not_a_pdf",
-            ocrAttempts: attempts,
-          });
-
-          continue;
-        }
-
-        const result = await extractTextFromPdfWithCloudConvert(
+        const extracted = await extractTextFromAttachment({
+          openai,
+          attachmentUrl: email.attachment_url,
+          filename,
+          contentType,
           buffer,
-          email.attachment_name || "attachment.pdf"
-        );
+        });
 
-        const extractedText = result.text.trim();
+        const text = extracted.text.trim();
 
-        if (!extractedText) {
+        if (!text) {
           throw new Error(
             JSON.stringify({
               step: "validate_extracted_text",
-              error: "OCR returned empty text",
-              jobId: result.jobId,
-              strategy: result.strategy,
+              error: "OCR completed but returned empty text",
+              method: extracted.method,
+              jobId: extracted.jobId || null,
+              strategy: extracted.strategy || null,
+              contentType,
+              contentLength,
+              downloadedBytes: buffer.length,
+              hexPreview: getHexPreview(buffer),
+              asciiPreview: getAsciiPreview(buffer),
             })
           );
         }
 
-        const attempts = await markEmailOcrState({
+        const attempts = await markEmail({
           supabase,
           emailId: email.id,
-          status: "ready_for_ai",
+          processingStatus: "ready_for_ai",
+          attachmentText: text,
           errorMessage: null,
-          attachmentText: extractedText,
           incrementAttempts: true,
         });
 
-        const appBaseUrl = getAppBaseUrl();
-
-        const triggerRes = await fetch(`${appBaseUrl}/api/process-emails`, {
-          method: "GET",
-          cache: "no-store",
-        });
-
-        let triggerJson: any = null;
+        let processEmailsResult: any = null;
+        let processEmailsStatus: number | null = null;
 
         try {
-          triggerJson = await triggerRes.json();
-        } catch {
-          triggerJson = null;
+          const appBaseUrl = getAppBaseUrl();
+
+          const processRes = await fetch(`${appBaseUrl}/api/process-emails`, {
+            method: "GET",
+            cache: "no-store",
+          });
+
+          processEmailsStatus = processRes.status;
+
+          try {
+            processEmailsResult = await processRes.json();
+          } catch {
+            processEmailsResult = null;
+          }
+        } catch (triggerError: any) {
+          processEmailsResult = {
+            ok: false,
+            error: triggerError?.message || "Failed to trigger process-emails",
+          };
         }
 
-        return NextResponse.json({
+        results.push({
           ok: true,
           emailId: email.id,
           provider: email.provider,
-          external_message_id:
-            email.external_message_id || email.gmail_message_id || null,
           subject: email.subject,
+          attachmentName: email.attachment_name,
           attachmentUrl: email.attachment_url,
-          responseContentType: contentType,
-          responseContentLength: contentLength,
+          contentType,
+          contentLength,
           downloadedBytes: buffer.length,
-          hexPreview,
-          asciiPreview,
-          textPreview: extractedText.slice(0, 1000),
-          textLength: extractedText.length,
-          ocrJobId: result.jobId,
-          ocrStrategy: result.strategy,
-          directTextLength: result.directTextLength,
-          ocrTextLength: result.ocrTextLength,
+          method: extracted.method,
+          strategy: extracted.strategy,
+          jobId: extracted.jobId || null,
+          directTextLength: extracted.directTextLength || 0,
+          ocrTextLength: extracted.ocrTextLength || 0,
+          textLength: text.length,
+          textPreview: text.slice(0, 1000),
           ocrAttempts: attempts,
-          skippedRows,
-          processEmailsTriggered: triggerRes.ok,
-          processEmailsStatus: triggerRes.status,
-          processEmailsResult: triggerJson,
+          processEmailsStatus,
+          processEmailsResult,
         });
       } catch (err: unknown) {
         const errorMessage = getErrorMessage(err);
         const creditsExceeded = isCreditsExceeded(errorMessage);
-        const nextAttempts = currentAttempts + 1;
 
-        if (creditsExceeded) {
-          const fallbackResult = await fallbackToAiUsingEmailBody({
-            supabase,
-            openai,
-            email,
-            ocrErrorMessage: errorMessage,
-          });
-
-          return NextResponse.json({
-            ok: true,
-            step: "ocr_blocked_fallback_to_ai",
-            emailId: email.id,
-            provider: email.provider,
-            external_message_id:
-              email.external_message_id || email.gmail_message_id || null,
-            subject: email.subject,
-            originalOcrError: errorMessage,
-            fallbackResult,
-            skippedRows,
-          });
-        }
-
-        const attempts = await markEmailOcrState({
+        const attempts = await markEmail({
           supabase,
           emailId: email.id,
-          status: "ocr_failed",
-          errorMessage:
-            nextAttempts >= MAX_OCR_ATTEMPTS
-              ? `Max OCR attempts reached (${MAX_OCR_ATTEMPTS}). Last error: ${errorMessage}`
-              : errorMessage,
+          processingStatus: creditsExceeded ? "ocr_blocked" : "ocr_failed",
+          errorMessage,
           incrementAttempts: true,
         });
 
-        skippedRows.push({
+        results.push({
+          ok: false,
           emailId: email.id,
+          provider: email.provider,
           subject: email.subject,
-          reason:
-            nextAttempts >= MAX_OCR_ATTEMPTS
-              ? "max_ocr_attempts_reached"
-              : "ocr_failed",
+          step: creditsExceeded ? "ocr_blocked" : "ocr_failed",
           error: errorMessage,
           ocrAttempts: attempts,
         });
@@ -603,14 +465,14 @@ export async function GET() {
 
     return NextResponse.json({
       ok: true,
-      message: "OCR cycle completed",
-      skippedRows,
+      processed: results.length,
+      results,
     });
   } catch (err: unknown) {
     return NextResponse.json(
       {
         ok: false,
-        step: "catch",
+        step: "process_ocr_catch",
         error: getErrorMessage(err),
       },
       { status: 500 }

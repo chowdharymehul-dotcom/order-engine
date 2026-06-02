@@ -24,6 +24,7 @@ type EmailRow = {
   external_message_id: string | null;
   gmail_message_id: string | null;
   received_at: string | null;
+  subject: string | null;
 };
 
 type GroupedEnquiry = {
@@ -43,12 +44,38 @@ type EnquiriesPageProps = {
   }>;
 };
 
+function clean(value: string | null | undefined) {
+  return String(value || "").trim();
+}
+
+function normalise(value: string | null | undefined) {
+  return clean(value).toLowerCase().replace(/\s+/g, " ");
+}
+
 function tabClass(active: boolean) {
   return `px-5 py-3 rounded-lg border text-sm font-medium transition ${
     active
       ? "bg-gray-100 border-gray-400 text-black"
       : "bg-white text-black hover:bg-gray-50"
   }`;
+}
+
+function formatDateTime(value: string | null) {
+  if (!value) return "";
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) return "";
+
+  return date.toLocaleString("en-IN", {
+    timeZone: "Asia/Kolkata",
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true,
+  });
 }
 
 function getGroupStatus(items: EnquiryItem[]) {
@@ -123,6 +150,50 @@ function getPriorityMeta(row: GroupedEnquiry) {
   };
 }
 
+function getMessageKey(item: EnquiryItem) {
+  return (
+    clean(item.external_message_id) ||
+    clean(item.gmail_message_id) ||
+    clean(item.email_subject) ||
+    clean(item.id)
+  );
+}
+
+function getGroupKey(item: EnquiryItem) {
+  return [
+    getMessageKey(item),
+    normalise(item.customer),
+    normalise(item.action),
+    normalise(item.email_subject),
+  ].join("::");
+}
+
+function findEmailForItem(params: {
+  item: EnquiryItem;
+  emailByMessageId: Map<string, EmailRow>;
+  emailBySubject: Map<string, EmailRow>;
+}) {
+  const { item, emailByMessageId, emailBySubject } = params;
+
+  const externalMessageId = clean(item.external_message_id);
+  const gmailMessageId = clean(item.gmail_message_id);
+  const subject = normalise(item.email_subject);
+
+  if (externalMessageId && emailByMessageId.has(externalMessageId)) {
+    return emailByMessageId.get(externalMessageId) || null;
+  }
+
+  if (gmailMessageId && emailByMessageId.has(gmailMessageId)) {
+    return emailByMessageId.get(gmailMessageId) || null;
+  }
+
+  if (subject && emailBySubject.has(subject)) {
+    return emailBySubject.get(subject) || null;
+  }
+
+  return null;
+}
+
 export default async function EnquiriesPage({
   searchParams,
 }: EnquiriesPageProps) {
@@ -154,8 +225,7 @@ export default async function EnquiriesPage({
       "Reply to Enquiry",
       "Follow Up",
       "Confirm Delivery",
-    ])
-    .order("id", { ascending: false });
+    ]);
 
   if (error) {
     return (
@@ -170,58 +240,35 @@ export default async function EnquiriesPage({
 
   const items = (data ?? []) as EnquiryItem[];
 
-  const externalIds = Array.from(
-    new Set(
-      items
-        .map((item) => item.external_message_id)
-        .filter((id): id is string => !!id)
-    )
-  );
+  const { data: emailRows } = await supabase
+    .from("emails")
+    .select("id, external_message_id, gmail_message_id, received_at, subject")
+    .order("received_at", { ascending: false })
+    .limit(5000);
 
-  const gmailIds = Array.from(
-    new Set(
-      items
-        .map((item) => item.gmail_message_id)
-        .filter((id): id is string => !!id)
-    )
-  );
+  const emailByMessageId = new Map<string, EmailRow>();
+  const emailBySubject = new Map<string, EmailRow>();
 
-  const emailMap = new Map<string, EmailRow>();
-
-  if (externalIds.length > 0) {
-    const { data: emailRows } = await supabase
-      .from("emails")
-      .select("id, external_message_id, gmail_message_id, received_at")
-      .in("external_message_id", externalIds);
-
-    for (const email of (emailRows ?? []) as EmailRow[]) {
-      if (email.external_message_id) {
-        emailMap.set(email.external_message_id, email);
-      }
+  for (const email of (emailRows ?? []) as EmailRow[]) {
+    if (email.external_message_id) {
+      emailByMessageId.set(email.external_message_id, email);
     }
-  }
 
-  if (gmailIds.length > 0) {
-    const { data: gmailEmailRows } = await supabase
-      .from("emails")
-      .select("id, external_message_id, gmail_message_id, received_at")
-      .in("gmail_message_id", gmailIds);
+    if (email.gmail_message_id) {
+      emailByMessageId.set(email.gmail_message_id, email);
+    }
 
-    for (const email of (gmailEmailRows ?? []) as EmailRow[]) {
-      if (email.gmail_message_id) {
-        emailMap.set(email.gmail_message_id, email);
-      }
+    const subjectKey = normalise(email.subject);
+
+    if (subjectKey && !emailBySubject.has(subjectKey)) {
+      emailBySubject.set(subjectKey, email);
     }
   }
 
   const groupedMap = new Map<string, EnquiryItem[]>();
 
   for (const item of items) {
-    const key =
-      item.external_message_id ||
-      item.gmail_message_id ||
-      item.email_subject ||
-      item.id;
+    const key = getGroupKey(item);
 
     if (!groupedMap.has(key)) {
       groupedMap.set(key, []);
@@ -234,9 +281,11 @@ export default async function EnquiriesPage({
     ([key, groupItems]) => {
       const first = groupItems[0];
 
-      const email =
-        emailMap.get(first.external_message_id || "") ||
-        emailMap.get(first.gmail_message_id || "");
+      const email = findEmailForItem({
+        item: first,
+        emailByMessageId,
+        emailBySubject,
+      });
 
       return {
         key,
@@ -405,9 +454,7 @@ export default async function EnquiriesPage({
                 return (
                   <tr key={row.key} className="hover:bg-gray-50">
                     <td className="p-3 border whitespace-nowrap">
-                      {row.received_at
-                        ? new Date(row.received_at).toLocaleString()
-                        : ""}
+                      {formatDateTime(row.received_at)}
                     </td>
 
                     <td className="p-3 border">{row.customer}</td>
@@ -435,9 +482,7 @@ export default async function EnquiriesPage({
                         {row.follow_up_due_at && (
                           <div className="text-xs text-gray-500">
                             Follow up:{" "}
-                            {new Date(
-                              row.follow_up_due_at
-                            ).toLocaleString()}
+                            {formatDateTime(row.follow_up_due_at)}
                           </div>
                         )}
                       </div>
@@ -473,7 +518,7 @@ export default async function EnquiriesPage({
                           </Link>
                         ) : (
                           <span className="px-4 py-2 rounded-lg text-sm bg-gray-100 text-gray-400 text-center">
-                            Original Email
+                            Original Email Missing
                           </span>
                         )}
 
@@ -481,7 +526,7 @@ export default async function EnquiriesPage({
                           <input
                             type="hidden"
                             name="entry_key"
-                            value={row.key}
+                            value={getMessageKey(firstItem)}
                           />
 
                           <input

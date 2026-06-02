@@ -1,6 +1,6 @@
-import { NextResponse } from "next/server";
-
 export const dynamic = "force-dynamic";
+
+import { NextResponse } from "next/server";
 
 export async function GET() {
   const params = new URLSearchParams({
@@ -10,9 +10,11 @@ export async function GET() {
     access_type: "offline",
     prompt: "consent",
     scope: [
-      "https://www.googleapis.com/auth/userinfo.email",
+      "openid",
+      "email",
+      "profile",
       "https://www.googleapis.com/auth/gmail.readonly",
-      "https://www.googleapis.com/auth/gmail.send", // ✅ IMPORTANT
+      "https://www.googleapis.com/auth/gmail.send",
     ].join(" "),
   });
 
