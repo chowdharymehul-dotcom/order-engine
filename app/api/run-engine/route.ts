@@ -21,24 +21,46 @@ function isAuthorized(req: NextRequest) {
 }
 
 async function safeJson(res: Response) {
-  try {
-    return await res.json();
-  } catch {
+  const text = await res.text();
+
+  if (!text) {
     return null;
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { raw: text.slice(0, 2000) };
   }
 }
 
 async function callRoute(appBaseUrl: string, route: string) {
-  const res = await fetch(`${appBaseUrl}${route}`, {
-    method: "GET",
-    cache: "no-store",
-  });
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 120000);
 
-  return {
-    route,
-    status: res.status,
-    result: await safeJson(res),
-  };
+    const res = await fetch(`${appBaseUrl}${route}`, {
+      method: "GET",
+      cache: "no-store",
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeout);
+
+    return {
+      ok: res.ok,
+      route,
+      status: res.status,
+      result: await safeJson(res),
+    };
+  } catch (error: any) {
+    return {
+      ok: false,
+      route,
+      status: 500,
+      error: error?.message || "Route call failed",
+    };
+  }
 }
 
 export async function GET(req: NextRequest) {
@@ -58,6 +80,7 @@ export async function GET(req: NextRequest) {
     const appBaseUrl = getAppBaseUrl();
 
     const gmailFetch = await callRoute(appBaseUrl, "/api/gmail/fetch");
+    const outlookFetch = await callRoute(appBaseUrl, "/api/outlook/fetch");
 
     const processEmailsPass1 = await callRoute(
       appBaseUrl,
@@ -76,6 +99,7 @@ export async function GET(req: NextRequest) {
       engine: "run-engine",
       appBaseUrl,
       gmailFetch,
+      outlookFetch,
       processEmailsPass1,
       processOcr,
       processEmailsPass2,

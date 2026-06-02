@@ -5,6 +5,7 @@ import { NextResponse } from "next/server";
 import { google } from "googleapis";
 import { createClient } from "@supabase/supabase-js";
 import { uploadAttachmentToSupabase } from "@/lib/attachment-storage";
+import { isRelevantBusinessEmail } from "@/lib/email-relevance";
 
 function decodeBase64Url(data: string) {
   return Buffer.from(data.replace(/-/g, "+").replace(/_/g, "/"), "base64");
@@ -256,8 +257,8 @@ export async function GET() {
 
     const listRes = await gmail.users.messages.list({
       userId: "me",
-      maxResults: 20,
-      q: "newer_than:2d",
+      maxResults: 50,
+      q: "newer_than:2d -category:promotions -category:social",
     });
 
     const messages = listRes.data.messages || [];
@@ -365,6 +366,30 @@ export async function GET() {
 
       const bodyText = extractPlainText(payload) || message.snippet || "";
 
+      const relevance = isRelevantBusinessEmail({
+        subject,
+        fromEmail: from,
+        bodyText,
+        attachmentName: attachment?.filename || "",
+        hasAttachment: !!attachment,
+      });
+
+      if (!relevance.relevant) {
+        results.push({
+          messageId,
+          subject,
+          from,
+          skipped: true,
+          reason: "irrelevant_email_not_saved",
+          relevanceReason: relevance.reason,
+          relevanceConfidence: relevance.confidence,
+          attachmentCount,
+          attachmentCandidates,
+        });
+
+        continue;
+      }
+
       let uploadedAttachment: any = null;
 
       if (attachment) {
@@ -412,6 +437,8 @@ export async function GET() {
         from,
         inserted: !insertError,
         error: insertError?.message || null,
+        relevanceReason: relevance.reason,
+        relevanceConfidence: relevance.confidence,
         attachmentCount,
         attachmentCandidates,
         selectedAttachment: uploadedAttachment,
