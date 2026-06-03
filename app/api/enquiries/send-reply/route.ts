@@ -1,82 +1,49 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import OpenAI from "openai";
-import { google } from "googleapis";
+import { sendViaGmail, sendViaOutlook } from "@/lib/send-email";
 
 export const dynamic = "force-dynamic";
 
-function createRawGmailMessage(params: {
-  to: string;
-  from?: string;
-  subject: string;
-  body: string;
-}) {
-  const lines = [
-    `To: ${params.to}`,
-    ...(params.from ? [`From: ${params.from}`] : []),
-    `Subject: ${params.subject}`,
-    "MIME-Version: 1.0",
-    "Content-Type: text/plain; charset=UTF-8",
-    "",
-    params.body,
-  ];
-
-  const message = lines.join("\r\n");
-
-  return Buffer.from(message)
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
+function getFollowUpDueAt(days = 3) {
+  const due = new Date();
+  due.setDate(due.getDate() + days);
+  return due.toISOString();
 }
 
-async function refreshOutlookToken(connection: any, supabaseAdmin: any) {
-  const res = await fetch(
-    "https://login.microsoftonline.com/common/oauth2/v2.0/token",
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body: new URLSearchParams({
-        client_id: process.env.OUTLOOK_CLIENT_ID!,
-        client_secret: process.env.OUTLOOK_CLIENT_SECRET!,
-        grant_type: "refresh_token",
-        refresh_token: connection.refresh_token,
-      }),
-    }
-  );
-
-  const data = await res.json();
-
-  if (!res.ok) {
-    throw new Error(data.error_description || data.error || "Refresh failed");
-  }
-
-  const expiresAt = new Date(Date.now() + data.expires_in * 1000).toISOString();
-
-  const { error } = await supabaseAdmin
-    .from("inbox_connections")
-    .update({
-      access_token: data.access_token,
-      refresh_token: data.refresh_token || connection.refresh_token,
-      expires_at: expiresAt,
-      connection_status: "active",
-      last_error: null,
-    })
-    .eq("id", connection.id);
-
-  if (error) {
-    throw new Error(`Failed to save refreshed Outlook token: ${error.message}`);
-  }
-
-  return data.access_token;
+function clean(value: any) {
+  return String(value ?? "").trim();
 }
 
-async function getConnectionForProvider(
-  supabaseAdmin: any,
-  provider: string
-) {
+function extractEmailAddress(value: string | null | undefined) {
+  const text = clean(value);
+
+  const angleMatch = text.match(/<([^>]+)>/);
+  if (angleMatch?.[1]) return angleMatch[1].trim();
+
+  const emailMatch = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  if (emailMatch?.[0]) return emailMatch[0].trim();
+
+  return text;
+}
+
+function inferProviderFromMessageId(value: string | null | undefined) {
+  const id = clean(value);
+
+  if (!id) return "";
+
+  if (id.startsWith("AAMk") || id.startsWith("AQMk")) {
+    return "outlook";
+  }
+
+  if (/^[a-f0-9]{12,32}$/i.test(id)) {
+    return "gmail";
+  }
+
+  return "";
+}
+
+async function getConnectionForProvider(supabaseAdmin: any, provider: string) {
   const { data, error } = await supabaseAdmin
     .from("inbox_connections")
     .select("*")
@@ -96,159 +63,128 @@ async function getConnectionForProvider(
   return data;
 }
 
-async function sendViaGmail(params: {
-  accessToken: string;
-  refreshToken?: string | null;
-  to: string;
-  subject: string;
-  body: string;
+async function polishReply(params: {
+  customer: string | null;
+  sku: string | null;
+  quantity: number | null;
+  query: string | null;
+  draft: string;
 }) {
-  const oauth2Client = new google.auth.OAuth2(
-    process.env.GOOGLE_CLIENT_ID,
-    process.env.GOOGLE_CLIENT_SECRET,
-    process.env.GOOGLE_REDIRECT_URI
-  );
+  if (!process.env.OPENAI_API_KEY) return params.draft;
 
-  oauth2Client.setCredentials({
-    access_token: params.accessToken,
-    refresh_token: params.refreshToken || undefined,
-  });
+  try {
+    const openai = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
+    });
 
-  const gmail = google.gmail({ version: "v1", auth: oauth2Client });
-
-  const raw = createRawGmailMessage({
-    to: params.to,
-    subject: params.subject,
-    body: params.body,
-  });
-
-  await gmail.users.messages.send({
-    userId: "me",
-    requestBody: {
-      raw,
-    },
-  });
-}
-
-async function sendViaOutlook(params: {
-  supabaseAdmin: any;
-  connection: any;
-  to: string;
-  subject: string;
-  body: string;
-}) {
-  let accessToken = params.connection.access_token;
-
-  if (
-    params.connection.expires_at &&
-    new Date(params.connection.expires_at).getTime() < Date.now()
-  ) {
-    accessToken = await refreshOutlookToken(
-      params.connection,
-      params.supabaseAdmin
-    );
-  }
-
-  const res = await fetch("https://graph.microsoft.com/v1.0/me/sendMail", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      message: {
-        subject: params.subject,
-        body: {
-          contentType: "Text",
-          content: params.body,
+    const ai = await openai.chat.completions.create({
+      model: "gpt-4.1-mini",
+      messages: [
+        {
+          role: "system",
+          content: `Rewrite the reply as a polished business email.
+Preserve meaning. Do not invent facts, prices, or deadlines.
+Return only the final email body text.`,
         },
-        toRecipients: [
-          {
-            emailAddress: {
-              address: params.to,
-            },
-          },
-        ],
-      },
-      saveToSentItems: true,
-    }),
-  });
+        {
+          role: "user",
+          content: `Customer: ${params.customer || ""}
+SKU: ${params.sku || ""}
+Quantity: ${params.quantity ?? ""}
+Original query: ${params.query || ""}
 
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`Outlook send failed: ${text || res.status}`);
+Draft:
+${params.draft}`,
+        },
+      ],
+    });
+
+    return ai.choices[0]?.message?.content?.trim() || params.draft;
+  } catch {
+    return params.draft;
   }
 }
 
-function getFollowUpDueAt(days = 3) {
-  const due = new Date();
-  due.setDate(due.getDate() + days);
-  return due.toISOString();
+async function findLinkedEmail(params: {
+  supabase: any;
+  externalMessageId: string;
+  gmailMessageId: string;
+  emailSubject: string;
+}) {
+  const { supabase, externalMessageId, gmailMessageId, emailSubject } = params;
+
+  if (externalMessageId) {
+    const { data } = await supabase
+      .from("emails")
+      .select("id, provider, from_email, subject, external_message_id, gmail_message_id")
+      .eq("external_message_id", externalMessageId)
+      .order("received_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (data) return data;
+  }
+
+  if (gmailMessageId) {
+    const { data } = await supabase
+      .from("emails")
+      .select("id, provider, from_email, subject, external_message_id, gmail_message_id")
+      .eq("gmail_message_id", gmailMessageId)
+      .order("received_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (data) return data;
+  }
+
+  if (emailSubject) {
+    const { data } = await supabase
+      .from("emails")
+      .select("id, provider, from_email, subject, external_message_id, gmail_message_id")
+      .eq("subject", emailSubject)
+      .order("received_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (data) return data;
+  }
+
+  return null;
 }
 
 export async function POST(req: NextRequest) {
   try {
     const formData = await req.formData();
 
-    const rawEnquiryId = formData.get("enquiry_id");
-    const rawTo = formData.get("to");
-    const rawSubject = formData.get("subject");
-    const rawMessage = formData.get("message");
-
-    const enquiryId =
-      typeof rawEnquiryId === "string"
-        ? rawEnquiryId.trim()
-        : String(rawEnquiryId ?? "").trim();
-
-    const to =
-      typeof rawTo === "string" ? rawTo.trim() : String(rawTo ?? "").trim();
-
-    const subject =
-      typeof rawSubject === "string"
-        ? rawSubject.trim()
-        : String(rawSubject ?? "").trim();
-
-    const message =
-      typeof rawMessage === "string"
-        ? rawMessage.trim()
-        : String(rawMessage ?? "").trim();
+    const enquiryId = clean(formData.get("enquiry_id"));
+    const to = extractEmailAddress(clean(formData.get("to")));
+    const subject = clean(formData.get("subject"));
+    const message = clean(formData.get("message"));
 
     if (!enquiryId) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: "Missing enquiry id",
-        },
+        { ok: false, error: "Missing enquiry id" },
         { status: 400 }
       );
     }
 
     if (!to) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: "Missing recipient email",
-        },
+        { ok: false, error: "Missing recipient email" },
         { status: 400 }
       );
     }
 
     if (!subject) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: "Missing reply subject",
-        },
+        { ok: false, error: "Missing reply subject" },
         { status: 400 }
       );
     }
 
     if (!message) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: "Reply message cannot be empty",
-        },
+        { ok: false, error: "Reply message cannot be empty" },
         { status: 400 }
       );
     }
@@ -261,68 +197,69 @@ export async function POST(req: NextRequest) {
     const { data: enquiry, error: enquiryError } = await supabase
       .from("order_items")
       .select(
-        "id, provider, customer, sku, quantity, notes, status, email_subject, source_email, action"
+        "id, provider, customer, sku, quantity, notes, status, email_subject, source_email, action, external_message_id, gmail_message_id"
       )
       .eq("id", enquiryId)
       .maybeSingle();
 
     if (enquiryError) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: enquiryError.message,
-        },
+        { ok: false, error: enquiryError.message },
         { status: 500 }
       );
     }
 
     if (!enquiry) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: "Enquiry not found",
-        },
+        { ok: false, error: "Enquiry not found" },
         { status: 404 }
       );
     }
 
-    let finalMessage = message;
+    const email = await findLinkedEmail({
+      supabase,
+      externalMessageId: clean(enquiry.external_message_id),
+      gmailMessageId: clean(enquiry.gmail_message_id),
+      emailSubject: clean(enquiry.email_subject),
+    });
 
-    if (process.env.OPENAI_API_KEY) {
-      try {
-        const openai = new OpenAI({
-          apiKey: process.env.OPENAI_API_KEY,
-        });
+    const providerFromEmail = clean(email?.provider).toLowerCase();
+    const providerFromItem = clean(enquiry.provider).toLowerCase();
+    const providerFromExternalId = inferProviderFromMessageId(
+      enquiry.external_message_id
+    );
+    const providerFromGmailId = inferProviderFromMessageId(
+      enquiry.gmail_message_id
+    );
 
-        const ai = await openai.chat.completions.create({
-          model: "gpt-4.1-mini",
-          messages: [
-            {
-              role: "system",
-              content: `Rewrite the reply as a polished business email.
-Preserve meaning. Do not invent facts, prices, or deadlines.
-Return only the final email body text.`,
-            },
-            {
-              role: "user",
-              content: `Customer: ${enquiry.customer || ""}
-SKU: ${enquiry.sku || ""}
-Quantity: ${enquiry.quantity ?? ""}
-Original query: ${enquiry.notes || enquiry.email_subject || ""}
+    const provider =
+      providerFromEmail ||
+      providerFromItem ||
+      providerFromExternalId ||
+      providerFromGmailId;
 
-Draft:
-${message}`,
-            },
-          ],
-        });
-
-        finalMessage = ai.choices[0]?.message?.content?.trim() || message;
-      } catch {
-        finalMessage = message;
-      }
+    if (!provider) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "Could not determine email provider for this enquiry",
+          enquiryId,
+          external_message_id: enquiry.external_message_id,
+          gmail_message_id: enquiry.gmail_message_id,
+          email_subject: enquiry.email_subject,
+          linkedEmailFound: !!email,
+        },
+        { status: 400 }
+      );
     }
 
-    const provider = (enquiry.provider || "").toLowerCase();
+    const finalMessage = await polishReply({
+      customer: enquiry.customer,
+      sku: enquiry.sku,
+      quantity: enquiry.quantity,
+      query: enquiry.notes || enquiry.email_subject || "",
+      draft: message,
+    });
 
     if (provider === "gmail") {
       const connection = await getConnectionForProvider(supabase, "gmail");
@@ -335,11 +272,7 @@ ${message}`,
         body: finalMessage,
       });
     } else if (provider === "outlook") {
-      const connection = await getConnectionForProvider(supabase, "outlook");
-
       await sendViaOutlook({
-        supabaseAdmin: supabase,
-        connection,
         to,
         subject,
         body: finalMessage,
@@ -348,7 +281,7 @@ ${message}`,
       return NextResponse.json(
         {
           ok: false,
-          error: "Unsupported provider for enquiry reply",
+          error: `Unsupported provider for reply: ${provider}`,
         },
         { status: 400 }
       );
@@ -356,12 +289,14 @@ ${message}`,
 
     const auditNote = [
       `Reply sent`,
+      `Provider: ${provider}`,
+      `Linked email found: ${email ? "yes" : "no"}`,
       `To: ${to}`,
       `Subject: ${subject}`,
       `Message: ${finalMessage}`,
     ].join("\n");
 
-    const existingNotes = enquiry.notes?.trim() || "";
+    const existingNotes = clean(enquiry.notes);
     const mergedNotes = existingNotes
       ? `${existingNotes}\n\n---\n${auditNote}`
       : auditNote;
@@ -377,18 +312,14 @@ ${message}`,
 
     if (updateError) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: updateError.message,
-        },
+        { ok: false, error: updateError.message },
         { status: 500 }
       );
     }
 
-    return NextResponse.redirect(
-      new URL("/enquiries-follow-up", req.url),
-      { status: 303 }
-    );
+    return NextResponse.redirect(new URL("/enquiries-follow-up", req.url), {
+      status: 303,
+    });
   } catch (error: any) {
     return NextResponse.json(
       {

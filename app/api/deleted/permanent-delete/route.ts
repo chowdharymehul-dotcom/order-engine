@@ -7,12 +7,26 @@ export async function POST(req: NextRequest) {
   try {
     const formData = await req.formData();
 
-    const emailId = String(formData.get("email_id") || "").trim();
-    const redirectTo = String(formData.get("redirect_to") || "/emails").trim();
+    const type = String(formData.get("type") || "").trim();
+    const id = String(formData.get("id") || "").trim();
 
-    if (!emailId) {
+    if (!type || !id) {
       return NextResponse.json(
-        { ok: false, error: "Missing email_id" },
+        { ok: false, error: "Missing type or id" },
+        { status: 400 }
+      );
+    }
+
+    const table =
+      type === "email"
+        ? "emails"
+        : type === "order_item"
+        ? "order_items"
+        : "";
+
+    if (!table) {
+      return NextResponse.json(
+        { ok: false, error: "Invalid delete type" },
         { status: 400 }
       );
     }
@@ -22,14 +36,7 @@ export async function POST(req: NextRequest) {
       process.env.SUPABASE_SERVICE_ROLE_KEY!
     );
 
-    const { error } = await supabase
-      .from("emails")
-      .update({
-        deleted_at: new Date().toISOString(),
-        deleted_from: "emails",
-        deleted_reason: "manual_delete",
-      })
-      .eq("id", emailId);
+    const { error } = await supabase.from(table).delete().eq("id", id);
 
     if (error) {
       return NextResponse.json(
@@ -38,14 +45,14 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    return NextResponse.redirect(new URL(redirectTo, req.url), {
+    return NextResponse.redirect(new URL("/deleted", req.url), {
       status: 303,
     });
   } catch (error: any) {
     return NextResponse.json(
       {
         ok: false,
-        error: error?.message || "Failed to delete email",
+        error: error?.message || "Failed to permanently delete item",
       },
       { status: 500 }
     );

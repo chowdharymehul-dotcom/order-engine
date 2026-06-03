@@ -4,6 +4,7 @@ export const revalidate = 0;
 import Link from "next/link";
 import { createClient } from "@supabase/supabase-js";
 import AutoRefresh from "@/components/AutoRefresh";
+import BulkSelectionControls from "@/components/BulkSelectionControls";
 
 type CancellationItem = {
   id: string;
@@ -43,12 +44,34 @@ type CancellationsPageProps = {
   }>;
 };
 
+function clean(value: string | null | undefined) {
+  return String(value || "").trim();
+}
+
 function tabClass(active: boolean) {
   return `px-5 py-3 rounded-lg border text-sm font-medium transition ${
     active
       ? "bg-gray-100 border-gray-400 text-black"
       : "bg-white text-black hover:bg-gray-50"
   }`;
+}
+
+function formatDateTime(value: string | null) {
+  if (!value) return "";
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) return "";
+
+  return date.toLocaleString("en-IN", {
+    timeZone: "Asia/Kolkata",
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true,
+  });
 }
 
 function getGroupStatus(items: CancellationItem[]) {
@@ -61,11 +84,25 @@ function getGroupStatus(items: CancellationItem[]) {
   return statuses[0] || "Pending";
 }
 
+function getGroupItemIds(items: CancellationItem[]) {
+  return items.map((item) => item.id).join(",");
+}
+
+function getMessageKey(item: CancellationItem) {
+  return (
+    clean(item.external_message_id) ||
+    clean(item.gmail_message_id) ||
+    clean(item.email_subject) ||
+    clean(item.id)
+  );
+}
+
 export default async function CancellationsPage({
   searchParams,
 }: CancellationsPageProps) {
   const params = await searchParams;
   const activeStatus = params?.status || "all";
+  const bulkFormId = "cancellations-bulk-form";
 
   const supabase = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -77,6 +114,7 @@ export default async function CancellationsPage({
     .select(
       "id, customer, po_number, sku, quantity, notes, status, email_subject, action, external_message_id, gmail_message_id"
     )
+    .is("deleted_at", null)
     .eq("action", "Cancel Order")
     .order("id", { ascending: false });
 
@@ -140,11 +178,7 @@ export default async function CancellationsPage({
   const groupedMap = new Map<string, CancellationItem[]>();
 
   for (const item of items) {
-    const key =
-      item.external_message_id ||
-      item.gmail_message_id ||
-      item.email_subject ||
-      item.id;
+    const key = getMessageKey(item);
 
     if (!groupedMap.has(key)) {
       groupedMap.set(key, []);
@@ -280,143 +314,174 @@ export default async function CancellationsPage({
         </Link>
       </div>
 
-      <div className="overflow-x-auto bg-white border rounded-xl">
-        <table className="w-full border-collapse text-sm">
-          <thead>
-            <tr className="bg-gray-100">
-              <th className="p-3 border text-left">Received On</th>
-              <th className="p-3 border text-left">Customer</th>
-              <th className="p-3 border text-left">PO Number</th>
-              <th className="p-3 border text-left">SKU</th>
-              <th className="p-3 border text-left">Qty</th>
-              <th className="p-3 border text-left">Notes</th>
-              <th className="p-3 border text-left">Action</th>
-              <th className="p-3 border text-left">Status</th>
-            </tr>
-          </thead>
+      <BulkSelectionControls
+        formId={bulkFormId}
+        label="Select All Cancellations"
+        showDelete={true}
+        showMove={true}
+      />
 
-          <tbody>
-            {sortedRows.length === 0 ? (
-              <tr>
-                <td colSpan={8} className="p-6 text-center text-gray-500">
-                  No cancellations found
-                </td>
+      <form id={bulkFormId} action="/api/bulk/action" method="POST">
+        <input type="hidden" name="type" value="order_items" />
+        <input type="hidden" name="source" value="Cancel Order" />
+        <input type="hidden" name="redirect_to" value="/cancellations" />
+
+        <div className="overflow-x-auto bg-white border rounded-xl">
+          <table className="w-full border-collapse text-sm">
+            <thead>
+              <tr className="bg-gray-100">
+                <th className="p-3 border text-left">Select</th>
+                <th className="p-3 border text-left">Received On</th>
+                <th className="p-3 border text-left">Customer</th>
+                <th className="p-3 border text-left">PO Number</th>
+                <th className="p-3 border text-left">SKU</th>
+                <th className="p-3 border text-left">Qty</th>
+                <th className="p-3 border text-left">Notes</th>
+                <th className="p-3 border text-left">Action</th>
+                <th className="p-3 border text-left">Status</th>
               </tr>
-            ) : (
-              sortedRows.map((row) => {
-                const firstItem = row.items[0];
+            </thead>
 
-                return (
-                  <tr key={row.key} className="hover:bg-gray-50">
-                    <td className="p-3 border whitespace-nowrap">
-                      {row.received_at
-                        ? new Date(row.received_at).toLocaleString()
-                        : ""}
-                    </td>
+            <tbody>
+              {sortedRows.length === 0 ? (
+                <tr>
+                  <td colSpan={9} className="p-6 text-center text-gray-500">
+                    No cancellations found
+                  </td>
+                </tr>
+              ) : (
+                sortedRows.map((row) => {
+                  const firstItem = row.items[0];
+                  const groupIds = getGroupItemIds(row.items);
 
-                    <td className="p-3 border">{row.customer}</td>
+                  return (
+                    <tr key={row.key} className="hover:bg-gray-50">
+                      <td className="p-3 border">
+                        <input
+                          type="checkbox"
+                          name="ids"
+                          value={groupIds}
+                          data-bulk-form={bulkFormId}
+                        />
+                      </td>
 
-                    <td className="p-3 border">{row.po_number}</td>
+                      <td className="p-3 border whitespace-nowrap">
+                        {formatDateTime(row.received_at)}
+                      </td>
 
-                    <td className="p-3 border">
-                      <div className="space-y-1">
-                        {row.items.map((item) => (
-                          <div key={item.id}>{item.sku || ""}</div>
-                        ))}
-                      </div>
-                    </td>
+                      <td className="p-3 border">{row.customer}</td>
 
-                    <td className="p-3 border">
-                      <div className="space-y-1">
-                        {row.items.map((item) => (
-                          <div key={item.id}>{item.quantity ?? ""}</div>
-                        ))}
-                      </div>
-                    </td>
+                      <td className="p-3 border">{row.po_number}</td>
 
-                    <td className="p-3 border">{row.notes}</td>
+                      <td className="p-3 border">
+                        <div className="space-y-1">
+                          {row.items.map((item) => (
+                            <div key={item.id}>{item.sku || ""}</div>
+                          ))}
+                        </div>
+                      </td>
 
-                    <td className="p-3 border">
-                      <div className="flex flex-col gap-2">
-                        <Link
-                          href={`/enquiries-follow-up/${firstItem.id}/reply`}
-                          className="px-4 py-2 rounded-lg text-sm bg-gray-200 text-black hover:bg-gray-300 text-center"
-                        >
-                          Reply
-                        </Link>
+                      <td className="p-3 border">
+                        <div className="space-y-1">
+                          {row.items.map((item) => (
+                            <div key={item.id}>{item.quantity ?? ""}</div>
+                          ))}
+                        </div>
+                      </td>
 
-                        {row.email_id ? (
+                      <td className="p-3 border">{row.notes}</td>
+
+                      <td className="p-3 border">
+                        <div className="flex flex-col gap-2">
                           <Link
-                            href={`/emails/${row.email_id}`}
-                            className="px-4 py-2 rounded-lg text-sm bg-blue-100 text-blue-700 hover:bg-blue-200 text-center"
+                            href={`/enquiries-follow-up/${firstItem.id}/reply`}
+                            className="px-4 py-2 rounded-lg text-sm bg-gray-200 text-black hover:bg-gray-300 text-center"
                           >
-                            Original Email
+                            Reply
                           </Link>
-                        ) : (
-                          <span className="px-4 py-2 rounded-lg text-sm bg-gray-100 text-gray-400 text-center">
-                            Original Email
-                          </span>
-                        )}
 
-                        <form action="/api/entries/delete" method="POST">
-                          <input
-                            type="hidden"
-                            name="entry_key"
-                            value={row.key}
-                          />
+                          {row.email_id ? (
+                            <Link
+                              href={`/emails/${row.email_id}`}
+                              className="px-4 py-2 rounded-lg text-sm bg-blue-100 text-blue-700 hover:bg-blue-200 text-center"
+                            >
+                              Original Email
+                            </Link>
+                          ) : (
+                            <span className="px-4 py-2 rounded-lg text-sm bg-gray-100 text-gray-400 text-center">
+                              Original Email
+                            </span>
+                          )}
 
-                          <input
-                            type="hidden"
-                            name="action"
-                            value="Cancel Order"
-                          />
-
-                          <input
-                            type="hidden"
-                            name="redirect_to"
-                            value="/cancellations"
-                          />
-
-                          <button className="w-full px-4 py-2 rounded-lg text-sm bg-red-100 text-red-700 hover:bg-red-200">
+                          <button
+                            type="submit"
+                            form={`delete-${firstItem.id}`}
+                            className="w-full px-4 py-2 rounded-lg text-sm bg-red-100 text-red-700 hover:bg-red-200"
+                          >
                             Delete
                           </button>
-                        </form>
-                      </div>
-                    </td>
+                        </div>
+                      </td>
 
-                    <td className="p-3 border">
-                      <form
-                        action="/api/cancellations/update-status"
-                        method="POST"
-                      >
-                        <input
-                          type="hidden"
-                          name="external_message_id"
-                          value={row.key}
-                        />
+                      <td className="p-3 border">
+                        <div className="flex items-center gap-2">
+                          <select
+                            name="status"
+                            defaultValue={row.status || "Pending"}
+                            className="border rounded px-2 py-1 bg-white"
+                            form={`status-${firstItem.id}`}
+                          >
+                            <option value="Pending">Pending</option>
+                            <option value="Approved">Approved</option>
+                            <option value="Denied">Denied</option>
+                          </select>
 
-                        <select
-                          name="status"
-                          defaultValue={row.status || "Pending"}
-                          className="border rounded px-2 py-1 bg-white"
-                        >
-                          <option value="Pending">Pending</option>
-                          <option value="Approved">Approved</option>
-                          <option value="Denied">Denied</option>
-                        </select>
+                          <button
+                            type="submit"
+                            form={`status-${firstItem.id}`}
+                            className="px-2 py-1 bg-gray-200 rounded hover:bg-gray-300"
+                          >
+                            Save
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </form>
 
-                        <button className="ml-2 px-2 py-1 bg-gray-200 rounded hover:bg-gray-300">
-                          Save
-                        </button>
-                      </form>
-                    </td>
-                  </tr>
-                );
-              })
-            )}
-          </tbody>
-        </table>
-      </div>
+      {sortedRows.map((row) => {
+        const firstItem = row.items[0];
+        const groupIds = getGroupItemIds(row.items);
+
+        return (
+          <div key={`forms-${firstItem.id}`}>
+            <form
+              id={`status-${firstItem.id}`}
+              action="/api/cancellations/update-status"
+              method="POST"
+            >
+              <input type="hidden" name="external_message_id" value={row.key} />
+            </form>
+
+            <form
+              id={`delete-${firstItem.id}`}
+              action="/api/bulk/action"
+              method="POST"
+            >
+              <input type="hidden" name="type" value="order_items" />
+              <input type="hidden" name="operation" value="delete" />
+              <input type="hidden" name="source" value="Cancel Order" />
+              <input type="hidden" name="redirect_to" value="/cancellations" />
+              <input type="hidden" name="ids" value={groupIds} />
+            </form>
+          </div>
+        );
+      })}
     </div>
   );
 }

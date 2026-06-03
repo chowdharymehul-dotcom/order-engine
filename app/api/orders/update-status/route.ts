@@ -3,19 +3,35 @@ import { createClient } from "@supabase/supabase-js";
 
 export const dynamic = "force-dynamic";
 
+function parseIds(value: string) {
+  return value
+    .split(",")
+    .map((id) => id.trim())
+    .filter(Boolean);
+}
+
 export async function POST(req: NextRequest) {
   try {
     const formData = await req.formData();
 
-    const emailId = String(formData.get("email_id") || "").trim();
-    const redirectTo = String(formData.get("redirect_to") || "/emails").trim();
+    const idsValue = String(formData.get("ids") || "").trim();
+    const status = String(formData.get("status") || "").trim();
 
-    if (!emailId) {
+    if (!idsValue) {
       return NextResponse.json(
-        { ok: false, error: "Missing email_id" },
+        { ok: false, error: "Missing order item ids" },
         { status: 400 }
       );
     }
+
+    if (!["New", "Approved", "Done"].includes(status)) {
+      return NextResponse.json(
+        { ok: false, error: "Invalid order status" },
+        { status: 400 }
+      );
+    }
+
+    const ids = parseIds(idsValue);
 
     const supabase = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -23,13 +39,9 @@ export async function POST(req: NextRequest) {
     );
 
     const { error } = await supabase
-      .from("emails")
-      .update({
-        deleted_at: new Date().toISOString(),
-        deleted_from: "emails",
-        deleted_reason: "manual_delete",
-      })
-      .eq("id", emailId);
+      .from("order_items")
+      .update({ status })
+      .in("id", ids);
 
     if (error) {
       return NextResponse.json(
@@ -38,14 +50,14 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    return NextResponse.redirect(new URL(redirectTo, req.url), {
+    return NextResponse.redirect(new URL("/orders", req.url), {
       status: 303,
     });
   } catch (error: any) {
     return NextResponse.json(
       {
         ok: false,
-        error: error?.message || "Failed to delete email",
+        error: error?.message || "Failed to update order status",
       },
       { status: 500 }
     );

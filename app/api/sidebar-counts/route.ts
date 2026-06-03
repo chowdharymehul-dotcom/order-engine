@@ -12,21 +12,37 @@ export async function GET() {
 
     const { count: orders } = await supabaseAdmin
       .from("order_items")
-      .select("*", { count: "exact", head: true });
+      .select("*", { count: "exact", head: true })
+      .is("deleted_at", null);
 
     const { count: emails } = await supabaseAdmin
       .from("emails")
-      .select("*", { count: "exact", head: true });
+      .select("*", { count: "exact", head: true })
+      .is("deleted_at", null);
+
+    const { count: deletedEmails } = await supabaseAdmin
+      .from("emails")
+      .select("*", { count: "exact", head: true })
+      .not("deleted_at", "is", null);
+
+    const { count: deletedOrderItems } = await supabaseAdmin
+      .from("order_items")
+      .select("*", { count: "exact", head: true })
+      .not("deleted_at", "is", null);
 
     const { count: needsOcr } = await supabaseAdmin
       .from("emails")
       .select("*", { count: "exact", head: true })
-      .eq("processing_status", "needs_ocr");
+      .eq("processing_status", "needs_ocr")
+      .is("deleted_at", null);
 
     return NextResponse.json({
       orders: orders || 0,
       emails: emails || 0,
       needsOcr: needsOcr || 0,
+      deletedItems:
+        (deletedEmails || 0) +
+        (deletedOrderItems || 0),
     });
   } catch (err: any) {
     return NextResponse.json(

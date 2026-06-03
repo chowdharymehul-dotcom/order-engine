@@ -7,6 +7,7 @@ import { useEffect, useRef, useState } from "react";
 type Counts = {
   orders: number;
   emails: number;
+  deletedItems: number;
 };
 
 type Notifications = {
@@ -30,6 +31,7 @@ const navItems = [
   { href: "/orders", label: "Orders", key: "orders" },
   { href: "/enquiries-follow-up", label: "Enquiries & Follow Up" },
   { href: "/cancellations", label: "Cancellation" },
+  { href: "/deleted", label: "Deleted Items", key: "deletedItems" },
 ];
 
 export default function Sidebar() {
@@ -38,6 +40,7 @@ export default function Sidebar() {
   const [counts, setCounts] = useState<Counts>({
     orders: 0,
     emails: 0,
+    deletedItems: 0,
   });
 
   const [notifications, setNotifications] = useState<Notifications>({
@@ -59,12 +62,14 @@ export default function Sidebar() {
         });
 
         if (!res.ok) return;
+
         const data = await res.json();
 
         if (isMounted) {
           setCounts({
             orders: data.orders || 0,
             emails: data.emails || 0,
+            deletedItems: data.deletedItems || 0,
           });
         }
       } catch {
@@ -79,6 +84,7 @@ export default function Sidebar() {
         });
 
         if (!res.ok) return;
+
         const data = await res.json();
 
         if (isMounted) {
@@ -99,6 +105,7 @@ export default function Sidebar() {
         });
 
         if (!res.ok) return;
+
         const data = await res.json();
 
         if (isMounted) {
@@ -193,9 +200,11 @@ export default function Sidebar() {
                     <div className="text-xs font-semibold text-black">
                       {item.title}
                     </div>
+
                     <div className="text-xs text-gray-700 mt-1">
                       {item.subtitle}
                     </div>
+
                     {item.meta ? (
                       <div className="text-[11px] text-gray-500 mt-1 truncate">
                         {item.meta}

@@ -114,7 +114,90 @@ function extractPoFallback(content: string) {
   return poMatch?.[1] || "";
 }
 
+function hasExplicitCancellationIntent(content: string) {
+  const text = cleanText(content).toLowerCase();
+
+  const explicitCancelPatterns = [
+    /\bplease\s+cancel\b/i,
+    /\bcancel\s+(this\s+)?order\b/i,
+    /\bcancel\s+(this\s+)?po\b/i,
+    /\bcancel\s+(the\s+)?purchase\s+order\b/i,
+    /\bcancel\s+(this\s+)?shipment\b/i,
+    /\bstop\s+(this\s+)?order\b/i,
+    /\bstop\s+production\b/i,
+    /\bdo\s+not\s+proceed\b/i,
+    /\bdon't\s+proceed\b/i,
+    /\bdo\s+not\s+ship\b/i,
+    /\bdon't\s+ship\b/i,
+    /\bhold\s+this\s+order\b/i,
+    /\bremove\s+this\s+item\b/i,
+    /\bremove\s+these\s+items\b/i,
+    /\border\s+cancelled\b/i,
+    /\border\s+canceled\b/i,
+    /\bpo\s+cancelled\b/i,
+    /\bpo\s+canceled\b/i,
+  ];
+
+  return explicitCancelPatterns.some((pattern) => pattern.test(text));
+}
+
+function hasOnlyCancelDateLanguage(content: string) {
+  const text = cleanText(content).toLowerCase();
+
+  const cancelDatePatterns = [
+    /\bcancel\s+date\b/i,
+    /\bcancel\s+by\b/i,
+    /\bcancel\s+after\b/i,
+    /\bcancellation\s+date\b/i,
+    /\border\s+cancel\s+date\b/i,
+    /\bship\s+cancel\s+date\b/i,
+    /\bstart\s+cancel\b/i,
+    /\bstart\s+date\b/i,
+    /\bcancel\s+\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}\b/i,
+  ];
+
+  const hasCancelDate = cancelDatePatterns.some((pattern) =>
+    pattern.test(text)
+  );
+
+  return hasCancelDate && !hasExplicitCancellationIntent(text);
+}
+
+function hasOrderSignals(content: string) {
+  const text = cleanText(content).toLowerCase();
+
+  const orderSignals = [
+    "purchase order",
+    "po #",
+    "po:",
+    "p.o.",
+    "vendor",
+    "ship to",
+    "bill to",
+    "style",
+    "sku",
+    "article",
+    "quantity",
+    "qty",
+    "pcs",
+    "yards",
+    "yds",
+    "unit price",
+    "amount",
+    "terms",
+    "fob",
+    "ship via",
+    "order lines",
+  ];
+
+  return orderSignals.some((signal) => text.includes(signal));
+}
+
 async function classifyEmail(content: string) {
+  if (hasOnlyCancelDateLanguage(content) && hasOrderSignals(content)) {
+    return "ORDER";
+  }
+
   const prompt = `
 You are a strict business email classifier.
 
@@ -129,6 +212,7 @@ Use ORDER only if the email clearly contains:
 - instruction to make / produce / ship goods
 - SKU/product with quantity
 - PO document text showing order lines
+- PDF purchase order forms, even if they contain fields like "cancel date", "cancel by", "start/cancel", or "cancellation date"
 
 ENQUIRY
 Use ENQUIRY only if the email contains:
@@ -142,14 +226,20 @@ Use ENQUIRY only if the email contains:
 - payment clarification
 - availability check
 - sample/query discussion
+- shipping bill status request
+- closure status request
+- invoice/payment clarification where no new order is being placed
 
 CANCELLATION
-Use CANCELLATION only if the email clearly asks to:
-- cancel order
-- stop order
+Use CANCELLATION only if the buyer clearly and explicitly asks to:
+- cancel an order
+- cancel a PO
+- stop an order
+- stop production
 - cancel shipment
 - remove/cancel items
 - not proceed with order
+- not ship the goods
 
 IGNORE
 Use IGNORE for everything else:
@@ -167,9 +257,21 @@ Use IGNORE for everything else:
 - bank promotions
 - automated alerts not related to orders/enquiries/cancellations
 
+CRITICAL CANCELLATION RULES:
+- "cancel date" is NOT a cancellation.
+- "cancellation date" is NOT a cancellation.
+- "cancel by" is NOT a cancellation.
+- "cancel after" is NOT a cancellation.
+- "start/cancel date" is NOT a cancellation.
+- A purchase order PDF with a "cancel date" field is ORDER, not CANCELLATION.
+- Only classify CANCELLATION when there is an explicit instruction to cancel/stop/not proceed.
+- If an email contains a PO/order and also a routine cancel date field, classify as ORDER.
+
 STRICT RULES:
 - "confirm delivery" = ENQUIRY
 - "delivery confirmation" = ENQUIRY
+- "shipping bill status" = ENQUIRY
+- "closure status" = ENQUIRY
 - Promotions = IGNORE
 - Unclear = IGNORE
 - Do not guess
@@ -200,6 +302,11 @@ ${content}
     value !== "IGNORE"
   ) {
     return "IGNORE";
+  }
+
+  if (value === "CANCELLATION" && !hasExplicitCancellationIntent(content)) {
+    if (hasOrderSignals(content)) return "ORDER";
+    return "ENQUIRY";
   }
 
   return value;
@@ -236,6 +343,7 @@ IMPORTANT EXTRACTION RULES:
 - Notes should be a short useful summary.
 - follow_up_date must be YYYY-MM-DD if clearly available, otherwise blank.
 - priority must be low, medium, or high.
+- Do not treat "cancel date", "cancel after", or "cancellation date" as a cancellation note unless the buyer explicitly asks to cancel.
 
 EMAIL / PDF TEXT:
 ${content}

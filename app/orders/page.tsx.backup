@@ -4,7 +4,6 @@ export const revalidate = 0;
 import Link from "next/link";
 import { createClient } from "@supabase/supabase-js";
 import AutoRefresh from "@/components/AutoRefresh";
-import BulkSelectionControls from "@/components/BulkSelectionControls";
 
 type OrderItem = {
   id: string;
@@ -108,16 +107,22 @@ function getMessageKey(item: OrderItem) {
 }
 
 function getGroupKey(item: OrderItem) {
+  /*
+    Important:
+    Do NOT group only by message ID.
+
+    Some old imported rows share message/thread IDs and then many unrelated
+    SKUs get mixed into one huge row.
+
+    This keeps "one row per real email/order" while preventing unrelated
+    orders from being merged.
+  */
   return [
     getMessageKey(item),
     normalise(item.customer),
     normalise(item.po_number),
     normalise(item.email_subject),
   ].join("::");
-}
-
-function getGroupItemIds(items: OrderItem[]) {
-  return items.map((item) => item.id).join(",");
 }
 
 function findEmailForItem(params: {
@@ -175,7 +180,6 @@ export default async function OrdersPage({ searchParams }: OrdersPageProps) {
   const activeAction = params?.action || "all";
   const activeStatus = params?.status || "all";
   const searchQuery = params?.q || "";
-  const bulkFormId = "orders-bulk-form";
 
   const supabase = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -187,7 +191,6 @@ export default async function OrdersPage({ searchParams }: OrdersPageProps) {
     .select(
       "id, action, customer, po_number, sku, quantity, notes, status, source_email, email_subject, external_message_id, gmail_message_id"
     )
-    .is("deleted_at", null)
     .ilike("action", "Place Order");
 
   if (error) {
@@ -201,6 +204,19 @@ export default async function OrdersPage({ searchParams }: OrdersPageProps) {
 
   const items = (data ?? []) as OrderItem[];
 
+  /*
+    Pull all email rows needed for lookup.
+
+    This is intentionally broad because older order_items may have either:
+    - gmail_message_id
+    - external_message_id
+    - only email_subject
+
+    The previous approach missed some email rows, causing:
+    - Date not found
+    - Original Email disabled
+    - Incorrect chronological order
+  */
   const { data: emailRows } = await supabase
     .from("emails")
     .select(
@@ -251,7 +267,9 @@ export default async function OrdersPage({ searchParams }: OrdersPageProps) {
       });
 
       const receivedAt = email?.received_at || null;
-      const receivedSort = receivedAt ? new Date(receivedAt).getTime() : 0;
+      const receivedSort = receivedAt
+        ? new Date(receivedAt).getTime()
+        : 0;
 
       return {
         key,
@@ -423,175 +441,110 @@ export default async function OrdersPage({ searchParams }: OrdersPageProps) {
       </div>
 
       <div className="text-sm text-gray-600">
-        Showing {sortedOrders.length} grouped orders. Latest received emails are
-        shown first.
+        Showing {sortedOrders.length} grouped orders. Latest received emails are shown first.
       </div>
 
-      <BulkSelectionControls
-        formId={bulkFormId}
-        label="Select All Orders"
-        showDelete={true}
-        showMove={true}
-      />
+      <div className="overflow-x-auto bg-white border rounded-xl">
+        <table className="w-full border-collapse text-sm">
+          <thead>
+            <tr className="bg-gray-100">
+              <th className="p-3 border text-left">Received On</th>
+              <th className="p-3 border text-left">Action</th>
+              <th className="p-3 border text-left">Customer</th>
+              <th className="p-3 border text-left">PO Number</th>
+              <th className="p-3 border text-left">SKU</th>
+              <th className="p-3 border text-left">Quantity</th>
+              <th className="p-3 border text-left">Notes</th>
+              <th className="p-3 border text-left">Status</th>
+              <th className="p-3 border text-left">Original Mail</th>
+              <th className="p-3 border text-left">Actions</th>
+            </tr>
+          </thead>
 
-      <form id={bulkFormId} action="/api/bulk/action" method="POST">
-        <input type="hidden" name="type" value="order_items" />
-        <input type="hidden" name="source" value="Place Order" />
-        <input type="hidden" name="redirect_to" value="/orders" />
-
-        <div className="overflow-x-auto bg-white border rounded-xl">
-          <table className="w-full border-collapse text-sm">
-            <thead>
-              <tr className="bg-gray-100">
-                <th className="p-3 border text-left">Select</th>
-                <th className="p-3 border text-left">Received On</th>
-                <th className="p-3 border text-left">Action</th>
-                <th className="p-3 border text-left">Customer</th>
-                <th className="p-3 border text-left">PO Number</th>
-                <th className="p-3 border text-left">SKU</th>
-                <th className="p-3 border text-left">Quantity</th>
-                <th className="p-3 border text-left">Notes</th>
-                <th className="p-3 border text-left">Status</th>
-                <th className="p-3 border text-left">Original Mail</th>
-                <th className="p-3 border text-left">Actions</th>
+          <tbody>
+            {sortedOrders.length === 0 ? (
+              <tr>
+                <td colSpan={10} className="p-6 text-center text-gray-500">
+                  No orders found
+                </td>
               </tr>
-            </thead>
+            ) : (
+              sortedOrders.map((order) => (
+                <tr key={order.key} className="hover:bg-gray-50">
+                  <td className="p-3 border whitespace-nowrap">
+                    {formatDateTime(order.received_at)}
+                  </td>
 
-            <tbody>
-              {sortedOrders.length === 0 ? (
-                <tr>
-                  <td colSpan={11} className="p-6 text-center text-gray-500">
-                    No orders found
+                  <td className="p-3 border">{order.action}</td>
+                  <td className="p-3 border">{order.customer}</td>
+                  <td className="p-3 border">{order.po_number}</td>
+
+                  <td className="p-3 border">
+                    <div className="space-y-1">
+                      {order.items.map((item) => (
+                        <div key={item.id}>{item.sku || ""}</div>
+                      ))}
+                    </div>
+                  </td>
+
+                  <td className="p-3 border">
+                    <div className="space-y-1">
+                      {order.items.map((item) => (
+                        <div key={item.id}>{item.quantity ?? ""}</div>
+                      ))}
+                    </div>
+                  </td>
+
+                  <td className="p-3 border">{order.notes}</td>
+                  <td className="p-3 border">{order.status}</td>
+                  <td className="p-3 border">{order.original_mail}</td>
+
+                  <td className="p-3 border">
+                    <div className="flex flex-col gap-2">
+                      {order.email_id ? (
+                        <Link
+                          href={`/emails/${order.email_id}`}
+                          className="px-4 py-2 rounded-lg text-sm bg-blue-100 text-blue-700 hover:bg-blue-200 text-center"
+                        >
+                          Original Email
+                        </Link>
+                      ) : (
+                        <span className="px-4 py-2 rounded-lg text-sm bg-gray-100 text-gray-400 text-center">
+                          Original Email Missing
+                        </span>
+                      )}
+
+                      <form action="/api/entries/delete" method="POST">
+                        <input
+                          type="hidden"
+                          name="entry_key"
+                          value={getMessageKey(order.items[0])}
+                        />
+
+                        <input
+                          type="hidden"
+                          name="action"
+                          value="Place Order"
+                        />
+
+                        <input
+                          type="hidden"
+                          name="redirect_to"
+                          value="/orders"
+                        />
+
+                        <button className="w-full px-4 py-2 rounded-lg text-sm bg-red-100 text-red-700 hover:bg-red-200">
+                          Delete
+                        </button>
+                      </form>
+                    </div>
                   </td>
                 </tr>
-              ) : (
-                sortedOrders.map((order) => {
-                  const firstItem = order.items[0];
-                  const groupIds = getGroupItemIds(order.items);
-
-                  return (
-                    <tr key={order.key} className="hover:bg-gray-50">
-                      <td className="p-3 border">
-                        <input
-                          type="checkbox"
-                          name="ids"
-                          value={groupIds}
-                          data-bulk-form={bulkFormId}
-                        />
-                      </td>
-
-                      <td className="p-3 border whitespace-nowrap">
-                        {formatDateTime(order.received_at)}
-                      </td>
-
-                      <td className="p-3 border">{order.action}</td>
-                      <td className="p-3 border">{order.customer}</td>
-                      <td className="p-3 border">{order.po_number}</td>
-
-                      <td className="p-3 border">
-                        <div className="space-y-1">
-                          {order.items.map((item) => (
-                            <div key={item.id}>{item.sku || ""}</div>
-                          ))}
-                        </div>
-                      </td>
-
-                      <td className="p-3 border">
-                        <div className="space-y-1">
-                          {order.items.map((item) => (
-                            <div key={item.id}>{item.quantity ?? ""}</div>
-                          ))}
-                        </div>
-                      </td>
-
-                      <td className="p-3 border">{order.notes}</td>
-
-                      <td className="p-3 border">
-                        <div className="flex items-center gap-2">
-                          <select
-                            name="status"
-                            defaultValue={order.status || "New"}
-                            className="border rounded px-2 py-1 bg-white"
-                            form={`status-${firstItem.id}`}
-                          >
-                            <option value="New">New</option>
-                            <option value="Approved">Approved</option>
-                            <option value="Done">Done</option>
-                          </select>
-
-                          <button
-                            type="submit"
-                            form={`status-${firstItem.id}`}
-                            className="px-2 py-1 bg-gray-200 rounded hover:bg-gray-300"
-                          >
-                            Save
-                          </button>
-                        </div>
-                      </td>
-
-                      <td className="p-3 border">{order.original_mail}</td>
-
-                      <td className="p-3 border">
-                        <div className="flex flex-col gap-2">
-                          {order.email_id ? (
-                            <Link
-                              href={`/emails/${order.email_id}`}
-                              className="px-4 py-2 rounded-lg text-sm bg-blue-100 text-blue-700 hover:bg-blue-200 text-center"
-                            >
-                              Original Email
-                            </Link>
-                          ) : (
-                            <span className="px-4 py-2 rounded-lg text-sm bg-gray-100 text-gray-400 text-center">
-                              Original Email Missing
-                            </span>
-                          )}
-
-                          <button
-                            type="submit"
-                            form={`delete-${firstItem.id}`}
-                            className="w-full px-4 py-2 rounded-lg text-sm bg-red-100 text-red-700 hover:bg-red-200"
-                          >
-                            Delete
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
-        </div>
-      </form>
-
-      {sortedOrders.map((order) => {
-        const firstItem = order.items[0];
-        const groupIds = getGroupItemIds(order.items);
-
-        return (
-          <div key={`forms-${firstItem.id}`}>
-            <form
-              id={`status-${firstItem.id}`}
-              action="/api/orders/update-status"
-              method="POST"
-            >
-              <input type="hidden" name="ids" value={groupIds} />
-            </form>
-
-            <form
-              id={`delete-${firstItem.id}`}
-              action="/api/bulk/action"
-              method="POST"
-            >
-              <input type="hidden" name="type" value="order_items" />
-              <input type="hidden" name="operation" value="delete" />
-              <input type="hidden" name="source" value="Place Order" />
-              <input type="hidden" name="redirect_to" value="/orders" />
-              <input type="hidden" name="ids" value={groupIds} />
-            </form>
-          </div>
-        );
-      })}
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

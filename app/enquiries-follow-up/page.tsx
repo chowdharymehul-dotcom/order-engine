@@ -4,6 +4,7 @@ export const revalidate = 0;
 import Link from "next/link";
 import { createClient } from "@supabase/supabase-js";
 import AutoRefresh from "@/components/AutoRefresh";
+import BulkSelectionControls from "@/components/BulkSelectionControls";
 
 type EnquiryItem = {
   id: string;
@@ -121,8 +122,7 @@ function getPriorityMeta(row: GroupedEnquiry) {
 
   if (row.status === "Follow Up with Customer" && row.follow_up_due_at) {
     const due = new Date(row.follow_up_due_at);
-    const diffHours =
-      (now.getTime() - due.getTime()) / (1000 * 60 * 60);
+    const diffHours = (now.getTime() - due.getTime()) / (1000 * 60 * 60);
 
     if (diffHours >= 48) {
       return {
@@ -168,6 +168,10 @@ function getGroupKey(item: EnquiryItem) {
   ].join("::");
 }
 
+function getGroupItemIds(items: EnquiryItem[]) {
+  return items.map((item) => item.id).join(",");
+}
+
 function findEmailForItem(params: {
   item: EnquiryItem;
   emailByMessageId: Map<string, EmailRow>;
@@ -199,6 +203,7 @@ export default async function EnquiriesPage({
 }: EnquiriesPageProps) {
   const params = await searchParams;
   const activeFilter = params?.filter || "all";
+  const bulkFormId = "enquiries-bulk-form";
 
   const supabase = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -212,6 +217,7 @@ export default async function EnquiriesPage({
     .update({
       status: "Follow Up with Customer",
     })
+    .is("deleted_at", null)
     .eq("status", "Replied")
     .not("follow_up_due_at", "is", null)
     .lt("follow_up_due_at", nowIso);
@@ -221,11 +227,8 @@ export default async function EnquiriesPage({
     .select(
       "id, customer, sku, quantity, notes, status, email_subject, action, follow_up_due_at, external_message_id, gmail_message_id"
     )
-    .in("action", [
-      "Reply to Enquiry",
-      "Follow Up",
-      "Confirm Delivery",
-    ]);
+    .is("deleted_at", null)
+    .in("action", ["Reply to Enquiry", "Follow Up", "Confirm Delivery"]);
 
   if (error) {
     return (
@@ -424,165 +427,206 @@ export default async function EnquiriesPage({
         </Link>
       </div>
 
-      <div className="overflow-x-auto bg-white border rounded-xl">
-        <table className="w-full border-collapse text-sm">
-          <thead>
-            <tr className="bg-gray-100">
-              <th className="p-3 border text-left">Received On</th>
-              <th className="p-3 border text-left">Customer</th>
-              <th className="p-3 border text-left">SKU</th>
-              <th className="p-3 border text-left">Quantity</th>
-              <th className="p-3 border text-left">Query</th>
-              <th className="p-3 border text-left">Priority</th>
-              <th className="p-3 border text-left">Action</th>
-              <th className="p-3 border text-left">Status</th>
-            </tr>
-          </thead>
+      <BulkSelectionControls
+        formId={bulkFormId}
+        label="Select All Enquiries"
+        showDelete={true}
+        showMove={true}
+      />
 
-          <tbody>
-            {sortedRows.length === 0 ? (
-              <tr>
-                <td colSpan={8} className="p-6 text-center text-gray-500">
-                  No items found
-                </td>
+      <form id={bulkFormId} action="/api/bulk/action" method="POST">
+        <input type="hidden" name="type" value="order_items" />
+        <input type="hidden" name="source" value="Reply to Enquiry" />
+        <input
+          type="hidden"
+          name="redirect_to"
+          value="/enquiries-follow-up"
+        />
+
+        <div className="overflow-x-auto bg-white border rounded-xl">
+          <table className="w-full border-collapse text-sm">
+            <thead>
+              <tr className="bg-gray-100">
+                <th className="p-3 border text-left">Select</th>
+                <th className="p-3 border text-left">Received On</th>
+                <th className="p-3 border text-left">Customer</th>
+                <th className="p-3 border text-left">SKU</th>
+                <th className="p-3 border text-left">Quantity</th>
+                <th className="p-3 border text-left">Query</th>
+                <th className="p-3 border text-left">Priority</th>
+                <th className="p-3 border text-left">Action</th>
+                <th className="p-3 border text-left">Status</th>
               </tr>
-            ) : (
-              sortedRows.map((row) => {
-                const firstItem = row.items[0];
-                const priority = getPriorityMeta(row);
+            </thead>
 
-                return (
-                  <tr key={row.key} className="hover:bg-gray-50">
-                    <td className="p-3 border whitespace-nowrap">
-                      {formatDateTime(row.received_at)}
-                    </td>
+            <tbody>
+              {sortedRows.length === 0 ? (
+                <tr>
+                  <td colSpan={9} className="p-6 text-center text-gray-500">
+                    No items found
+                  </td>
+                </tr>
+              ) : (
+                sortedRows.map((row) => {
+                  const firstItem = row.items[0];
+                  const priority = getPriorityMeta(row);
+                  const groupIds = getGroupItemIds(row.items);
 
-                    <td className="p-3 border">{row.customer}</td>
+                  return (
+                    <tr key={row.key} className="hover:bg-gray-50">
+                      <td className="p-3 border">
+                        <input
+                          type="checkbox"
+                          name="ids"
+                          value={groupIds}
+                          data-bulk-form={bulkFormId}
+                        />
+                      </td>
 
-                    <td className="p-3 border">
-                      <div className="space-y-1">
-                        {row.items.map((item) => (
-                          <div key={item.id}>{item.sku || ""}</div>
-                        ))}
-                      </div>
-                    </td>
+                      <td className="p-3 border whitespace-nowrap">
+                        {formatDateTime(row.received_at)}
+                      </td>
 
-                    <td className="p-3 border">
-                      <div className="space-y-1">
-                        {row.items.map((item) => (
-                          <div key={item.id}>{item.quantity ?? ""}</div>
-                        ))}
-                      </div>
-                    </td>
+                      <td className="p-3 border">{row.customer}</td>
 
-                    <td className="p-3 border">
-                      <div className="space-y-2">
-                        <div>{row.query}</div>
+                      <td className="p-3 border">
+                        <div className="space-y-1">
+                          {row.items.map((item) => (
+                            <div key={item.id}>{item.sku || ""}</div>
+                          ))}
+                        </div>
+                      </td>
 
-                        {row.follow_up_due_at && (
-                          <div className="text-xs text-gray-500">
-                            Follow up:{" "}
-                            {formatDateTime(row.follow_up_due_at)}
-                          </div>
-                        )}
-                      </div>
-                    </td>
+                      <td className="p-3 border">
+                        <div className="space-y-1">
+                          {row.items.map((item) => (
+                            <div key={item.id}>{item.quantity ?? ""}</div>
+                          ))}
+                        </div>
+                      </td>
 
-                    <td className="p-3 border">
-                      {priority.label ? (
-                        <span
-                          className={`px-2 py-1 text-xs rounded ${priority.style}`}
-                        >
-                          {priority.label}
-                        </span>
-                      ) : (
-                        ""
-                      )}
-                    </td>
+                      <td className="p-3 border">
+                        <div className="space-y-2">
+                          <div>{row.query}</div>
 
-                    <td className="p-3 border">
-                      <div className="flex flex-col gap-2">
-                        <Link
-                          href={`/enquiries-follow-up/${firstItem.id}/reply`}
-                          className="px-4 py-2 rounded-lg text-sm bg-gray-200 text-black hover:bg-gray-300 text-center"
-                        >
-                          Reply
-                        </Link>
+                          {row.follow_up_due_at && (
+                            <div className="text-xs text-gray-500">
+                              Follow up: {formatDateTime(row.follow_up_due_at)}
+                            </div>
+                          )}
+                        </div>
+                      </td>
 
-                        {row.email_id ? (
-                          <Link
-                            href={`/emails/${row.email_id}`}
-                            className="px-4 py-2 rounded-lg text-sm bg-blue-100 text-blue-700 hover:bg-blue-200 text-center"
+                      <td className="p-3 border">
+                        {priority.label ? (
+                          <span
+                            className={`px-2 py-1 text-xs rounded ${priority.style}`}
                           >
-                            Original Email
-                          </Link>
-                        ) : (
-                          <span className="px-4 py-2 rounded-lg text-sm bg-gray-100 text-gray-400 text-center">
-                            Original Email Missing
+                            {priority.label}
                           </span>
+                        ) : (
+                          ""
                         )}
+                      </td>
 
-                        <form action="/api/entries/delete" method="POST">
-                          <input
-                            type="hidden"
-                            name="entry_key"
-                            value={getMessageKey(firstItem)}
-                          />
+                      <td className="p-3 border">
+                        <div className="flex flex-col gap-2">
+                          <Link
+                            href={`/enquiries-follow-up/${firstItem.id}/reply`}
+                            className="px-4 py-2 rounded-lg text-sm bg-gray-200 text-black hover:bg-gray-300 text-center"
+                          >
+                            Reply
+                          </Link>
 
-                          <input
-                            type="hidden"
-                            name="action"
-                            value="Reply to Enquiry"
-                          />
+                          {row.email_id ? (
+                            <Link
+                              href={`/emails/${row.email_id}`}
+                              className="px-4 py-2 rounded-lg text-sm bg-blue-100 text-blue-700 hover:bg-blue-200 text-center"
+                            >
+                              Original Email
+                            </Link>
+                          ) : (
+                            <span className="px-4 py-2 rounded-lg text-sm bg-gray-100 text-gray-400 text-center">
+                              Original Email Missing
+                            </span>
+                          )}
 
-                          <input
-                            type="hidden"
-                            name="redirect_to"
-                            value="/enquiries-follow-up"
-                          />
-
-                          <button className="w-full px-4 py-2 rounded-lg text-sm bg-red-100 text-red-700 hover:bg-red-200">
+                          <button
+                            type="submit"
+                            form={`delete-${firstItem.id}`}
+                            className="w-full px-4 py-2 rounded-lg text-sm bg-red-100 text-red-700 hover:bg-red-200"
+                          >
                             Delete
                           </button>
-                        </form>
-                      </div>
-                    </td>
+                        </div>
+                      </td>
 
-                    <td className="p-3 border">
-                      <form action="/api/enquiries/update-status" method="POST">
-                        <input
-                          type="hidden"
-                          name="id"
-                          value={firstItem.id}
-                        />
+                      <td className="p-3 border">
+                        <div className="flex items-center gap-2">
+                          <select
+                            name="status"
+                            defaultValue={row.status || "Pending"}
+                            className="border rounded px-2 py-1 bg-white"
+                            form={`status-${firstItem.id}`}
+                          >
+                            <option value="Replied">Replied</option>
+                            <option value="Pending">Pending</option>
+                            <option value="Follow Up with Customer">
+                              Follow Up with Customer
+                            </option>
+                            <option value="Close Enquiry">Close Enquiry</option>
+                          </select>
 
-                        <select
-                          name="status"
-                          defaultValue={row.status || "Pending"}
-                          className="border rounded px-2 py-1 bg-white"
-                        >
-                          <option value="Replied">Replied</option>
-                          <option value="Pending">Pending</option>
-                          <option value="Follow Up with Customer">
-                            Follow Up with Customer
-                          </option>
-                          <option value="Close Enquiry">
-                            Close Enquiry
-                          </option>
-                        </select>
+                          <button
+                            type="submit"
+                            form={`status-${firstItem.id}`}
+                            className="px-2 py-1 bg-gray-200 rounded hover:bg-gray-300"
+                          >
+                            Save
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </form>
 
-                        <button className="ml-2 px-2 py-1 bg-gray-200 rounded hover:bg-gray-300">
-                          Save
-                        </button>
-                      </form>
-                    </td>
-                  </tr>
-                );
-              })
-            )}
-          </tbody>
-        </table>
-      </div>
+      {sortedRows.map((row) => {
+        const firstItem = row.items[0];
+        const groupIds = getGroupItemIds(row.items);
+
+        return (
+          <div key={`forms-${firstItem.id}`}>
+            <form
+              id={`status-${firstItem.id}`}
+              action="/api/enquiries/update-status"
+              method="POST"
+            >
+              <input type="hidden" name="id" value={firstItem.id} />
+            </form>
+
+            <form
+              id={`delete-${firstItem.id}`}
+              action="/api/bulk/action"
+              method="POST"
+            >
+              <input type="hidden" name="type" value="order_items" />
+              <input type="hidden" name="operation" value="delete" />
+              <input type="hidden" name="source" value="Reply to Enquiry" />
+              <input
+                type="hidden"
+                name="redirect_to"
+                value="/enquiries-follow-up"
+              />
+              <input type="hidden" name="ids" value={groupIds} />
+            </form>
+          </div>
+        );
+      })}
     </div>
   );
 }
