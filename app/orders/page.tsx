@@ -19,6 +19,9 @@ type OrderItem = {
   email_subject: string | null;
   external_message_id: string | null;
   gmail_message_id: string | null;
+  oc_pdf_url: string | null;
+  oc_status: string | null;
+  oc_document_id: string | null;
 };
 
 type EmailRow = {
@@ -41,6 +44,9 @@ type GroupedOrder = {
   notes: string;
   status: string;
   original_mail: string;
+  oc_pdf_url: string | null;
+  oc_status: string;
+  oc_document_id: string | null;
   items: OrderItem[];
 };
 
@@ -158,6 +164,7 @@ function matchesSearch(order: GroupedOrder, query: string) {
     order.notes,
     order.status,
     order.original_mail,
+    order.oc_status,
     order.received_at || "",
     ...order.items.map((item) => item.sku || ""),
     ...order.items.map((item) => String(item.quantity || "")),
@@ -185,7 +192,7 @@ export default async function OrdersPage({ searchParams }: OrdersPageProps) {
   const { data, error } = await supabase
     .from("order_items")
     .select(
-      "id, action, customer, po_number, sku, quantity, notes, status, source_email, email_subject, external_message_id, gmail_message_id"
+      "id, action, customer, po_number, sku, quantity, notes, status, source_email, email_subject, external_message_id, gmail_message_id, oc_pdf_url, oc_status, oc_document_id"
     )
     .is("deleted_at", null)
     .ilike("action", "Place Order");
@@ -253,6 +260,16 @@ export default async function OrdersPage({ searchParams }: OrdersPageProps) {
       const receivedAt = email?.received_at || null;
       const receivedSort = receivedAt ? new Date(receivedAt).getTime() : 0;
 
+      const ocPdfUrl =
+        groupItems.find((item) => item.oc_pdf_url)?.oc_pdf_url || null;
+
+      const ocDocumentId =
+        groupItems.find((item) => item.oc_document_id)?.oc_document_id || null;
+
+      const ocStatus =
+        groupItems.find((item) => item.oc_status)?.oc_status ||
+        "Not Generated";
+
       return {
         key,
         email_id: email?.id || null,
@@ -272,6 +289,9 @@ export default async function OrdersPage({ searchParams }: OrdersPageProps) {
           first.email_subject ||
           first.source_email ||
           "Original email not linked",
+        oc_pdf_url: ocPdfUrl,
+        oc_status: ocStatus,
+        oc_document_id: ocDocumentId,
         items: groupItems,
       };
     }
@@ -327,6 +347,13 @@ export default async function OrdersPage({ searchParams }: OrdersPageProps) {
             className="px-4 py-2 border rounded-lg hover:bg-gray-50"
           >
             Cancellations
+          </Link>
+
+          <Link
+            href="/oc-templates"
+            className="px-4 py-2 border rounded-lg hover:bg-gray-50"
+          >
+            OC Templates
           </Link>
         </div>
       </div>
@@ -452,6 +479,7 @@ export default async function OrdersPage({ searchParams }: OrdersPageProps) {
                 <th className="p-3 border text-left">Quantity</th>
                 <th className="p-3 border text-left">Notes</th>
                 <th className="p-3 border text-left">Status</th>
+                <th className="p-3 border text-left">OC</th>
                 <th className="p-3 border text-left">Original Mail</th>
                 <th className="p-3 border text-left">Actions</th>
               </tr>
@@ -460,7 +488,7 @@ export default async function OrdersPage({ searchParams }: OrdersPageProps) {
             <tbody>
               {sortedOrders.length === 0 ? (
                 <tr>
-                  <td colSpan={11} className="p-6 text-center text-gray-500">
+                  <td colSpan={12} className="p-6 text-center text-gray-500">
                     No orders found
                   </td>
                 </tr>
@@ -529,6 +557,49 @@ export default async function OrdersPage({ searchParams }: OrdersPageProps) {
                         </div>
                       </td>
 
+                      <td className="p-3 border">
+                        <div className="flex flex-col gap-2">
+                          <div className="text-xs text-gray-600">
+                            {order.oc_status || "Not Generated"}
+                          </div>
+
+                          <button
+                            type="submit"
+                            form={`generate-oc-${firstItem.id}`}
+                            className="px-4 py-2 rounded-lg text-sm bg-purple-100 text-purple-700 hover:bg-purple-200 text-center"
+                          >
+                            Generate OC
+                          </button>
+
+                          {order.oc_document_id ? (
+                            <Link
+                              href={`/orders/${firstItem.id}/oc`}
+                              className="px-4 py-2 rounded-lg text-sm bg-yellow-100 text-yellow-700 hover:bg-yellow-200 text-center"
+                            >
+                              Review/Edit OC
+                            </Link>
+                          ) : (
+                            <span className="px-4 py-2 rounded-lg text-sm bg-gray-100 text-gray-400 text-center">
+                              Review/Edit OC
+                            </span>
+                          )}
+
+                          {order.oc_pdf_url ? (
+                            <a
+                              href={order.oc_pdf_url}
+                              target="_blank"
+                              className="px-4 py-2 rounded-lg text-sm bg-green-100 text-green-700 hover:bg-green-200 text-center"
+                            >
+                              View OC
+                            </a>
+                          ) : (
+                            <span className="px-4 py-2 rounded-lg text-sm bg-gray-100 text-gray-400 text-center">
+                              View OC
+                            </span>
+                          )}
+                        </div>
+                      </td>
+
                       <td className="p-3 border">{order.original_mail}</td>
 
                       <td className="p-3 border">
@@ -587,6 +658,14 @@ export default async function OrdersPage({ searchParams }: OrdersPageProps) {
               <input type="hidden" name="operation" value="delete" />
               <input type="hidden" name="source" value="Place Order" />
               <input type="hidden" name="redirect_to" value="/orders" />
+              <input type="hidden" name="ids" value={groupIds} />
+            </form>
+
+            <form
+              id={`generate-oc-${firstItem.id}`}
+              action="/api/orders/generate-oc"
+              method="POST"
+            >
               <input type="hidden" name="ids" value={groupIds} />
             </form>
           </div>
