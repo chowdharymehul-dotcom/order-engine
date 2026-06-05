@@ -9,6 +9,7 @@ type OCTemplate = {
   seller_profile_id: string | null;
   company_name: string | null;
   template_name: string | null;
+  template_type: string | null;
   template_url: string | null;
   is_active: boolean | null;
   created_at: string | null;
@@ -43,6 +44,11 @@ function sellerNameFor(template: OCTemplate, sellers: SellerProfile[]) {
   return seller?.profile_name || seller?.company_name || "";
 }
 
+function templateTypeLabel(type: string | null) {
+  if (type === "sample") return "Sample Completed OC";
+  return "Blank Template";
+}
+
 const inputClass =
   "w-full border border-gray-300 rounded-lg px-4 py-3 text-sm text-gray-900 bg-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-300 focus:border-gray-400";
 
@@ -55,7 +61,7 @@ export default async function OCTemplatesPage() {
   const { data: templatesData, error } = await supabase
     .from("oc_templates")
     .select(
-      "id, seller_profile_id, company_name, template_name, template_url, is_active, created_at"
+      "id, seller_profile_id, company_name, template_name, template_type, template_url, is_active, created_at"
     )
     .order("created_at", { ascending: false });
 
@@ -75,8 +81,8 @@ export default async function OCTemplatesPage() {
         <div>
           <h1 className="text-3xl font-bold">OC Templates</h1>
           <p className="text-sm text-gray-500 mt-1">
-            Upload company OC formats and map fields for template-based PDF
-            generation.
+            Upload blank formats or sample completed OCs, then map fields for
+            template-based PDF generation.
           </p>
         </div>
 
@@ -114,8 +120,9 @@ export default async function OCTemplatesPage() {
         <h2 className="text-xl font-semibold">Upload Seller OC Format</h2>
 
         <p className="text-sm text-gray-600">
-          Upload a seller’s existing Order Confirmation PDF. Each seller profile
-          can have its own active OC template and field mapping.
+          Upload either a blank OC format or a sample completed OC. Blank
+          templates are ideal. Sample completed OCs can also be used, and mapped
+          fields can later cover old sample values with white boxes.
         </p>
 
         <form
@@ -141,6 +148,17 @@ export default async function OCTemplatesPage() {
                   {seller.profile_name || seller.company_name}
                 </option>
               ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium mb-1">
+              Template Type
+            </label>
+
+            <select name="template_type" required className={inputClass}>
+              <option value="blank">Blank Template</option>
+              <option value="sample">Sample Completed OC</option>
             </select>
           </div>
 
@@ -202,6 +220,7 @@ export default async function OCTemplatesPage() {
                 <th className="p-3 border text-left">Seller Profile</th>
                 <th className="p-3 border text-left">Company</th>
                 <th className="p-3 border text-left">Template</th>
+                <th className="p-3 border text-left">Type</th>
                 <th className="p-3 border text-left">Status</th>
                 <th className="p-3 border text-left">Actions</th>
               </tr>
@@ -210,7 +229,7 @@ export default async function OCTemplatesPage() {
             <tbody>
               {templates.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="p-6 text-center text-gray-500">
+                  <td colSpan={7} className="p-6 text-center text-gray-500">
                     No OC templates uploaded yet
                   </td>
                 </tr>
@@ -231,6 +250,10 @@ export default async function OCTemplatesPage() {
 
                     <td className="p-3 border">
                       {template.template_name || ""}
+                    </td>
+
+                    <td className="p-3 border">
+                      {templateTypeLabel(template.template_type)}
                     </td>
 
                     <td className="p-3 border">

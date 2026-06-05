@@ -17,6 +17,7 @@ export async function POST(req: NextRequest) {
     const sellerProfileId = String(formData.get("seller_profile_id") || "").trim();
     const companyName = String(formData.get("company_name") || "").trim();
     const templateName = String(formData.get("template_name") || "").trim();
+    const templateType = String(formData.get("template_type") || "blank").trim();
     const file = formData.get("template_file") as File | null;
 
     if (!sellerProfileId) {
@@ -36,6 +37,13 @@ export async function POST(req: NextRequest) {
     if (!templateName) {
       return NextResponse.json(
         { ok: false, error: "Missing template name" },
+        { status: 400 }
+      );
+    }
+
+    if (templateType !== "blank" && templateType !== "sample") {
+      return NextResponse.json(
+        { ok: false, error: "Invalid template type" },
         { status: 400 }
       );
     }
@@ -90,6 +98,7 @@ export async function POST(req: NextRequest) {
       seller_profile_id: sellerProfileId,
       company_name: companyName,
       template_name: templateName,
+      template_type: templateType,
       template_url: publicUrlData.publicUrl,
       storage_path: storagePath,
       is_active: true,
