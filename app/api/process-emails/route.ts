@@ -4,6 +4,7 @@ export const revalidate = 0;
 import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
+import { findCustomerForEmail } from "@/lib/customerAutoLink";
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY!,
@@ -442,7 +443,15 @@ async function insertOrderItems(params: {
   const gmailMessageId = getGmailMessageId(email);
   const normalizedItems = normalizeItems(structured.items);
 
-  const customer = cleanText(structured.customer || "");
+  const customerMatch = await findCustomerForEmail({
+    supabase,
+    fromEmail: email.from_email,
+    extractedCustomerName: structured.customer || "",
+  });
+
+  const customer =
+    customerMatch.customer_name || cleanText(structured.customer || "");
+
   const poNumber =
     cleanText(structured.po_number || "") || extractPoFallback(combinedText);
 
@@ -450,6 +459,12 @@ async function insertOrderItems(params: {
     cleanText(structured.notes || "") ||
     cleanText(email.subject || "") ||
     "Extracted from email / attachment";
+
+  const customerLinkPayload = {
+    customer_id: customerMatch.customer_id,
+    customer_match_method: customerMatch.customer_match_method,
+    customer_match_confidence: customerMatch.customer_match_confidence,
+  };
 
   if (intent === "ORDER") {
     let validItems = normalizedItems.filter((item) => item.sku);
@@ -477,6 +492,7 @@ async function insertOrderItems(params: {
         external_message_id: externalMessageId,
         gmail_message_id: gmailMessageId,
         email_subject: email.subject || "",
+        ...customerLinkPayload,
       });
     }
 
@@ -505,6 +521,7 @@ async function insertOrderItems(params: {
       gmail_message_id: gmailMessageId,
       email_subject: email.subject || "",
       follow_up_due_at: structured.follow_up_date || null,
+      ...customerLinkPayload,
     });
 
     return 1;
@@ -531,6 +548,7 @@ async function insertOrderItems(params: {
       external_message_id: externalMessageId,
       gmail_message_id: gmailMessageId,
       email_subject: email.subject || "",
+      ...customerLinkPayload,
     });
 
     return 1;

@@ -6,11 +6,18 @@ import { createClient } from "@supabase/supabase-js";
 
 type OCTemplate = {
   id: string;
+  seller_profile_id: string | null;
   company_name: string | null;
   template_name: string | null;
   template_url: string | null;
   is_active: boolean | null;
   created_at: string | null;
+};
+
+type SellerProfile = {
+  id: string;
+  profile_name: string | null;
+  company_name: string | null;
 };
 
 function formatDateTime(value: string | null) {
@@ -31,31 +38,61 @@ function formatDateTime(value: string | null) {
   });
 }
 
+function sellerNameFor(template: OCTemplate, sellers: SellerProfile[]) {
+  const seller = sellers.find((item) => item.id === template.seller_profile_id);
+  return seller?.profile_name || seller?.company_name || "";
+}
+
+const inputClass =
+  "w-full border border-gray-300 rounded-lg px-4 py-3 text-sm text-gray-900 bg-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-300 focus:border-gray-400";
+
 export default async function OCTemplatesPage() {
   const supabase = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!
   );
 
-  const { data, error } = await supabase
+  const { data: templatesData, error } = await supabase
     .from("oc_templates")
-    .select("id, company_name, template_name, template_url, is_active, created_at")
+    .select(
+      "id, seller_profile_id, company_name, template_name, template_url, is_active, created_at"
+    )
     .order("created_at", { ascending: false });
 
-  const templates = (data || []) as OCTemplate[];
+  const { data: sellersData } = await supabase
+    .from("seller_profiles")
+    .select("id, profile_name, company_name")
+    .eq("is_active", true)
+    .order("is_default", { ascending: false })
+    .order("company_name", { ascending: true });
+
+  const templates = (templatesData || []) as OCTemplate[];
+  const sellers = (sellersData || []) as SellerProfile[];
 
   return (
     <div className="p-10 space-y-8">
       <div className="flex items-center justify-between">
-        <h1 className="text-3xl font-bold">OC Templates</h1>
+        <div>
+          <h1 className="text-3xl font-bold">OC Templates</h1>
+          <p className="text-sm text-gray-500 mt-1">
+            Upload company OC formats and map fields for template-based PDF
+            generation.
+          </p>
+        </div>
 
         <div className="flex gap-3">
-          <Link href="/orders" className="px-4 py-2 border rounded-lg">
+          <Link
+            href="/orders"
+            className="px-4 py-2 border border-gray-300 rounded-lg text-gray-900 hover:bg-gray-100"
+          >
             Orders
           </Link>
 
-          <Link href="/" className="px-4 py-2 border rounded-lg">
-            Dashboard
+          <Link
+            href="/seller-profiles"
+            className="px-4 py-2 border border-gray-300 rounded-lg text-gray-900 hover:bg-gray-100"
+          >
+            Seller Profiles
           </Link>
         </div>
       </div>
@@ -66,13 +103,19 @@ export default async function OCTemplatesPage() {
         </div>
       )}
 
+      {sellers.length === 0 && (
+        <div className="p-4 rounded-lg bg-yellow-50 text-yellow-800 border border-yellow-200">
+          Please create at least one Seller Profile before uploading an OC
+          template.
+        </div>
+      )}
+
       <div className="bg-white border rounded-xl p-6 space-y-4">
-        <h2 className="text-xl font-semibold">Upload Company OC Format</h2>
+        <h2 className="text-xl font-semibold">Upload Seller OC Format</h2>
 
         <p className="text-sm text-gray-600">
-          Upload the company’s existing Order Confirmation PDF as a reference.
-          The generated OC will use your company details and extracted order
-          data. Later we can map the exact visual layout field-by-field.
+          Upload a seller’s existing Order Confirmation PDF. Each seller profile
+          can have its own active OC template and field mapping.
         </p>
 
         <form
@@ -83,13 +126,33 @@ export default async function OCTemplatesPage() {
         >
           <div>
             <label className="block text-sm font-medium mb-1">
+              Seller Profile
+            </label>
+
+            <select
+              name="seller_profile_id"
+              required
+              className={inputClass}
+              disabled={sellers.length === 0}
+            >
+              <option value="">Select seller profile</option>
+              {sellers.map((seller) => (
+                <option key={seller.id} value={seller.id}>
+                  {seller.profile_name || seller.company_name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium mb-1">
               Company Name
             </label>
             <input
               name="company_name"
               required
               placeholder="Pinx International"
-              className="w-full border rounded-lg px-4 py-3 text-sm"
+              className={inputClass}
             />
           </div>
 
@@ -101,7 +164,7 @@ export default async function OCTemplatesPage() {
               name="template_name"
               required
               placeholder="Default OC Format"
-              className="w-full border rounded-lg px-4 py-3 text-sm"
+              className={inputClass}
             />
           </div>
 
@@ -114,11 +177,15 @@ export default async function OCTemplatesPage() {
               type="file"
               accept="application/pdf"
               required
-              className="w-full border rounded-lg px-4 py-3 text-sm"
+              className={inputClass}
+              disabled={sellers.length === 0}
             />
           </div>
 
-          <button className="px-5 py-3 rounded-lg bg-gray-900 text-white text-sm">
+          <button
+            className="px-5 py-3 rounded-lg bg-gray-700 hover:bg-gray-800 text-white text-sm disabled:opacity-50"
+            disabled={sellers.length === 0}
+          >
             Upload Template
           </button>
         </form>
@@ -132,17 +199,18 @@ export default async function OCTemplatesPage() {
             <thead>
               <tr className="bg-gray-100">
                 <th className="p-3 border text-left">Created</th>
+                <th className="p-3 border text-left">Seller Profile</th>
                 <th className="p-3 border text-left">Company</th>
                 <th className="p-3 border text-left">Template</th>
                 <th className="p-3 border text-left">Status</th>
-                <th className="p-3 border text-left">File</th>
+                <th className="p-3 border text-left">Actions</th>
               </tr>
             </thead>
 
             <tbody>
               {templates.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="p-6 text-center text-gray-500">
+                  <td colSpan={6} className="p-6 text-center text-gray-500">
                     No OC templates uploaded yet
                   </td>
                 </tr>
@@ -154,6 +222,10 @@ export default async function OCTemplatesPage() {
                     </td>
 
                     <td className="p-3 border">
+                      {sellerNameFor(template, sellers) || "Unassigned"}
+                    </td>
+
+                    <td className="p-3 border">
                       {template.company_name || ""}
                     </td>
 
@@ -162,21 +234,36 @@ export default async function OCTemplatesPage() {
                     </td>
 
                     <td className="p-3 border">
-                      {template.is_active ? "Active" : "Inactive"}
+                      {template.is_active ? (
+                        <span className="px-2 py-1 rounded bg-gray-100 text-gray-700 text-xs border">
+                          Active
+                        </span>
+                      ) : (
+                        <span className="px-2 py-1 rounded bg-gray-50 text-gray-500 text-xs border">
+                          Inactive
+                        </span>
+                      )}
                     </td>
 
                     <td className="p-3 border">
-                      {template.template_url ? (
-                        <a
-                          href={template.template_url}
-                          target="_blank"
-                          className="text-blue-700 hover:underline"
+                      <div className="flex gap-2 flex-wrap">
+                        {template.template_url && (
+                          <a
+                            href={template.template_url}
+                            target="_blank"
+                            className="px-4 py-2 rounded-lg bg-gray-100 text-gray-900 border hover:bg-gray-200"
+                          >
+                            View PDF
+                          </a>
+                        )}
+
+                        <Link
+                          href={`/oc-templates/${template.id}/designer`}
+                          className="px-4 py-2 rounded-lg bg-gray-200 text-gray-900 border border-gray-300 hover:bg-gray-300"
                         >
-                          View PDF
-                        </a>
-                      ) : (
-                        ""
-                      )}
+                          Design Template
+                        </Link>
+                      </div>
                     </td>
                   </tr>
                 ))

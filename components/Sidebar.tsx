@@ -31,6 +31,9 @@ const navItems = [
   { href: "/orders", label: "Orders", key: "orders" },
   { href: "/enquiries-follow-up", label: "Enquiries & Follow Up" },
   { href: "/cancellations", label: "Cancellation" },
+  { href: "/customers", label: "Customers" },
+  { href: "/seller-profiles", label: "Seller Profiles" },
+  { href: "/oc-templates", label: "OC Templates" },
   { href: "/deleted", label: "Deleted Items", key: "deletedItems" },
 ];
 

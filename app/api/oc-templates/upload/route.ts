@@ -14,9 +14,17 @@ export async function POST(req: NextRequest) {
   try {
     const formData = await req.formData();
 
+    const sellerProfileId = String(formData.get("seller_profile_id") || "").trim();
     const companyName = String(formData.get("company_name") || "").trim();
     const templateName = String(formData.get("template_name") || "").trim();
     const file = formData.get("template_file") as File | null;
+
+    if (!sellerProfileId) {
+      return NextResponse.json(
+        { ok: false, error: "Missing seller profile" },
+        { status: 400 }
+      );
+    }
 
     if (!companyName) {
       return NextResponse.json(
@@ -52,7 +60,6 @@ export async function POST(req: NextRequest) {
     );
 
     const buffer = Buffer.from(await file.arrayBuffer());
-
     const storagePath = `templates/${Date.now()}-${safeFileName(file.name)}`;
 
     const { error: uploadError } = await supabase.storage
@@ -76,9 +83,11 @@ export async function POST(req: NextRequest) {
     await supabase
       .from("oc_templates")
       .update({ is_active: false })
+      .eq("seller_profile_id", sellerProfileId)
       .eq("is_active", true);
 
     const { error: insertError } = await supabase.from("oc_templates").insert({
+      seller_profile_id: sellerProfileId,
       company_name: companyName,
       template_name: templateName,
       template_url: publicUrlData.publicUrl,

@@ -1,27 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { generateOCPdfBuffer } from "@/lib/oc-pdf";
 
 export const dynamic = "force-dynamic";
 
 type OrderItem = {
   id: string;
   customer: string | null;
+  customer_id: string | null;
   po_number: string | null;
   sku: string | null;
   quantity: number | null;
   notes: string | null;
-  email_subject: string | null;
-  external_message_id: string | null;
-  gmail_message_id: string | null;
-};
-
-type EmailRow = {
-  id: string;
-  from_email: string | null;
-  subject: string | null;
-  external_message_id: string | null;
-  gmail_message_id: string | null;
+  unit_price: number | null;
+  total_amount: number | null;
+  currency: string | null;
 };
 
 function parseIds(value: string) {
@@ -31,51 +23,31 @@ function parseIds(value: string) {
     .filter(Boolean);
 }
 
-function clean(value: string | null | undefined) {
-  return String(value || "").trim();
-}
-
-function safeFileName(name: string) {
-  return name
-    .replace(/[^a-zA-Z0-9._-]/g, "_")
-    .replace(/_+/g, "_")
-    .slice(0, 120);
-}
-
-function formatOCDate() {
-  return new Date().toLocaleDateString("en-IN", {
-    timeZone: "Asia/Kolkata",
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-  });
-}
-
 function makeOCNumber() {
   const now = new Date();
-  const y = now.getFullYear();
-  const m = String(now.getMonth() + 1).padStart(2, "0");
-  const d = String(now.getDate()).padStart(2, "0");
-  const t = String(now.getTime()).slice(-6);
+  const year = now.getFullYear();
+  const timestamp = String(now.getTime()).slice(-6);
 
-  return `OC-${y}${m}${d}-${t}`;
+  return `OC-${year}-${timestamp}`;
 }
 
-function findEmailForOrder(items: OrderItem[], emails: EmailRow[]) {
-  const first = items[0];
+function numericValue(value: number | null | undefined) {
+  if (value === null || value === undefined) return null;
 
-  const externalId = clean(first.external_message_id);
-  const gmailId = clean(first.gmail_message_id);
-  const subject = clean(first.email_subject).toLowerCase();
+  const num = Number(value);
 
-  return (
-    emails.find((email) => email.external_message_id === externalId) ||
-    emails.find((email) => email.gmail_message_id === gmailId) ||
-    emails.find(
-      (email) => clean(email.subject).toLowerCase() === subject && subject
-    ) ||
-    null
-  );
+  if (!Number.isFinite(num)) return null;
+
+  return num;
+}
+
+function calculateLineTotal(quantity: number | null, unitPrice: number | null) {
+  const qty = numericValue(quantity);
+  const price = numericValue(unitPrice);
+
+  if (qty === null || price === null) return null;
+
+  return qty * price;
 }
 
 export async function POST(req: NextRequest) {
@@ -83,168 +55,187 @@ export async function POST(req: NextRequest) {
     const formData = await req.formData();
 
     const idsValue = String(formData.get("ids") || "").trim();
+    const singleId = String(formData.get("id") || "").trim();
 
-    if (!idsValue) {
-      return NextResponse.json(
-        { ok: false, error: "Missing order item ids" },
-        { status: 400 }
-      );
-    }
-
-    const ids = parseIds(idsValue);
+    const ids = idsValue ? parseIds(idsValue) : singleId ? [singleId] : [];
 
     if (ids.length === 0) {
       return NextResponse.json(
-        { ok: false, error: "No valid order item ids received" },
+        { ok: false, error: "Missing order item id" },
         { status: 400 }
       );
     }
+
+    const primaryOrderItemId = ids[0];
 
     const supabase = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
       process.env.SUPABASE_SERVICE_ROLE_KEY!
     );
 
-    const { data: template, error: templateError } = await supabase
-      .from("oc_templates")
-      .select("*")
-      .eq("is_active", true)
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
+    const { data: orderRows, error: orderError } = await supabase
+      .from("order_items")
+      .select(
+        "id, customer, customer_id, po_number, sku, quantity, notes, unit_price, total_amount, currency"
+      )
+      .in("id", ids);
 
-    if (templateError) {
+    if (orderError) {
       return NextResponse.json(
-        { ok: false, error: templateError.message },
+        { ok: false, error: orderError.message },
         { status: 500 }
       );
     }
 
-    if (!template) {
+    const orderItems = ((orderRows || []) as OrderItem[]).sort(
+      (a, b) => ids.indexOf(a.id) - ids.indexOf(b.id)
+    );
+
+    if (orderItems.length === 0) {
+      return NextResponse.json(
+        { ok: false, error: "Order items not found" },
+        { status: 404 }
+      );
+    }
+
+    const first = orderItems[0];
+
+    const { data: existingOC, error: existingError } = await supabase
+      .from("order_confirmations")
+      .select("id")
+      .or(`order_item_id.eq.${primaryOrderItemId},order_item_ids.cs.{${primaryOrderItemId}}`)
+      .maybeSingle();
+
+    if (existingError) {
+      return NextResponse.json(
+        { ok: false, error: existingError.message },
+        { status: 500 }
+      );
+    }
+
+    if (existingOC?.id) {
+      return NextResponse.redirect(
+        new URL(`/orders/${primaryOrderItemId}/oc`, req.url),
+        { status: 303 }
+      );
+    }
+
+    const { data: sellerProfile, error: sellerError } = await supabase
+      .from("seller_profiles")
+      .select("id")
+      .eq("is_active", true)
+      .order("is_default", { ascending: false })
+      .order("created_at", { ascending: true })
+      .limit(1)
+      .maybeSingle();
+
+    if (sellerError) {
+      return NextResponse.json(
+        { ok: false, error: sellerError.message },
+        { status: 500 }
+      );
+    }
+
+    if (!sellerProfile) {
       return NextResponse.json(
         {
           ok: false,
           error:
-            "No active OC template found. Please upload an OC template first.",
+            "No active seller profile found. Please create a seller profile first.",
         },
         { status: 400 }
       );
     }
 
-    const { data: rows, error: rowsError } = await supabase
-      .from("order_items")
-      .select(
-        "id, customer, po_number, sku, quantity, notes, email_subject, external_message_id, gmail_message_id"
-      )
-      .in("id", ids);
-
-    if (rowsError) {
-      return NextResponse.json(
-        { ok: false, error: rowsError.message },
-        { status: 500 }
-      );
-    }
-
-    const orderItems = (rows || []) as OrderItem[];
-
-    if (orderItems.length === 0) {
-      return NextResponse.json(
-        { ok: false, error: "No matching order items found" },
-        { status: 404 }
-      );
-    }
-
-    const { data: emailRows } = await supabase
-      .from("emails")
-      .select("id, from_email, subject, external_message_id, gmail_message_id")
-      .limit(5000);
-
-    const email = findEmailForOrder(orderItems, (emailRows || []) as EmailRow[]);
-
-    const first = orderItems[0];
     const ocNumber = makeOCNumber();
+    const today = new Date().toISOString().slice(0, 10);
 
-    const pdfBuffer = await generateOCPdfBuffer({
-      companyName: template.company_name || "Company",
-      customer: first.customer || "",
-      customerEmail: email?.from_email || "",
-      poNumber: first.po_number || "",
-      ocNumber,
-      ocDate: formatOCDate(),
-      items: orderItems.map((item) => ({
-        sku: item.sku || "",
-        quantity: item.quantity ?? "",
-        notes: item.notes || "",
-      })),
-    });
+    const notes = orderItems
+      .map((item) => item.notes)
+      .filter(Boolean)
+      .join(" | ");
 
-    const storagePath = `generated/${Date.now()}-${safeFileName(
-      `${ocNumber}.pdf`
-    )}`;
-
-    const { error: uploadError } = await supabase.storage
-      .from("oc-documents")
-      .upload(storagePath, pdfBuffer, {
-        contentType: "application/pdf",
-        upsert: false,
-      });
-
-    if (uploadError) {
-      return NextResponse.json(
-        { ok: false, error: uploadError.message },
-        { status: 500 }
-      );
-    }
-
-    const { data: publicUrlData } = supabase.storage
-      .from("oc-documents")
-      .getPublicUrl(storagePath);
-
-    const { data: ocDoc, error: insertError } = await supabase
-      .from("oc_documents")
+    const { data: ocData, error: insertError } = await supabase
+      .from("order_confirmations")
       .insert({
+        order_item_id: primaryOrderItemId,
         order_item_ids: ids,
-        customer: first.customer || "",
-        customer_email: email?.from_email || "",
+        customer_id: first.customer_id,
+        seller_profile_id: sellerProfile.id,
+        oc_number: ocNumber,
+        oc_date: today,
         po_number: first.po_number || "",
-        pdf_url: publicUrlData.publicUrl,
-        storage_path: storagePath,
-        status: "Generated",
+        delivery_date: null,
+        payment_terms: "",
+        shipment_terms: "",
+        internal_notes: notes,
+        customer_notes: "",
+        pdf_url: null,
+        status: "Draft",
+        updated_at: new Date().toISOString(),
       })
       .select("id")
       .single();
 
-    if (insertError) {
+    if (insertError || !ocData) {
       return NextResponse.json(
-        { ok: false, error: insertError.message },
+        {
+          ok: false,
+          error: insertError?.message || "Failed to create OC draft",
+        },
         { status: 500 }
       );
     }
 
-    const { error: updateError } = await supabase
+    const ocId = ocData.id;
+
+    const lineItemsPayload = orderItems.map((item) => {
+      const unitPrice = numericValue(item.unit_price);
+      const lineTotal =
+        numericValue(item.total_amount) ??
+        calculateLineTotal(item.quantity, unitPrice);
+
+      return {
+        order_confirmation_id: ocId,
+        sku: item.sku || "",
+        quantity: numericValue(item.quantity),
+        unit_price: unitPrice,
+        currency: item.currency || "USD",
+        line_total: lineTotal,
+        notes: item.notes || "",
+        custom_fields: {},
+      };
+    });
+
+    const { error: lineItemsError } = await supabase
+      .from("order_confirmation_line_items")
+      .insert(lineItemsPayload);
+
+    if (lineItemsError) {
+      return NextResponse.json(
+        { ok: false, error: lineItemsError.message },
+        { status: 500 }
+      );
+    }
+
+    await supabase
       .from("order_items")
       .update({
-        oc_pdf_url: publicUrlData.publicUrl,
-        oc_status: "Generated",
-        oc_document_id: ocDoc.id,
+        oc_status: "Draft",
       })
       .in("id", ids);
 
-    if (updateError) {
-      return NextResponse.json(
-        { ok: false, error: updateError.message },
-        { status: 500 }
-      );
-    }
-
-    return NextResponse.redirect(new URL("/orders", req.url), {
-      status: 303,
-    });
+    return NextResponse.redirect(
+      new URL(`/orders/${primaryOrderItemId}/oc`, req.url),
+      {
+        status: 303,
+      }
+    );
   } catch (error: any) {
     return NextResponse.json(
       {
         ok: false,
-        error: error?.message || "Failed to generate OC",
+        error: error?.message || "Failed to create OC draft",
       },
       { status: 500 }
     );
