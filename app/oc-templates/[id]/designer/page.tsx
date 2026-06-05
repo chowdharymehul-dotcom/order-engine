@@ -3,7 +3,8 @@ export const revalidate = 0;
 
 import Link from "next/link";
 import { createClient } from "@supabase/supabase-js";
-import OCTemplateClickDesigner from "@/components/OCTemplateClickDesigner";
+import OCTemplateDesignerV4 from "@/components/OCTemplateDesignerV4";
+import OCTemplateRegionDesigner from "@/components/OCTemplateRegionDesigner";
 
 type Template = {
   id: string;
@@ -16,6 +17,7 @@ type Template = {
 
 type Mapping = {
   id: string;
+  region_id: string | null;
   field_name: string | null;
   display_label: string | null;
   field_type: string | null;
@@ -27,9 +29,44 @@ type Mapping = {
 
 type TemplateColumn = {
   id: string;
+  region_id: string | null;
   display_label: string | null;
   source_field: string | null;
   column_order: number | null;
+};
+
+type TemplateRegion = {
+  id: string;
+  region_name: string | null;
+  display_label: string | null;
+  region_type: string | null;
+  page_number: number | null;
+  x_position: number | null;
+  y_position: number | null;
+  width: number | null;
+  height: number | null;
+  row_height: number | null;
+  column_gap: number | null;
+};
+
+type TemplateTotal = {
+  id: string;
+  region_id: string | null;
+  display_label: string | null;
+  total_key: string | null;
+  formula_type: string | null;
+  total_order: number | null;
+};
+
+type StaticBlock = {
+  id: string;
+  region_id: string | null;
+  display_label: string | null;
+  block_key: string | null;
+  content: string | null;
+  x_position: number | null;
+  y_position: number | null;
+  font_size: number | null;
 };
 
 type DesignerPageProps = {
@@ -58,10 +95,20 @@ export default async function OCTemplateDesignerPage({
 
   const template = (templateData || null) as Template | null;
 
+  const { data: regionsData } = await supabase
+    .from("oc_template_regions")
+    .select(
+      "id, region_name, display_label, region_type, page_number, x_position, y_position, width, height, row_height, column_gap"
+    )
+    .eq("template_id", id)
+    .order("region_name", { ascending: true });
+
+  const regions = (regionsData || []) as TemplateRegion[];
+
   const { data: mappingsData } = await supabase
     .from("oc_template_mappings")
     .select(
-      "id, field_name, display_label, field_type, page_number, x_position, y_position, font_size"
+      "id, region_id, field_name, display_label, field_type, page_number, x_position, y_position, font_size"
     )
     .eq("template_id", id)
     .order("field_name", { ascending: true });
@@ -70,11 +117,29 @@ export default async function OCTemplateDesignerPage({
 
   const { data: columnsData } = await supabase
     .from("oc_template_columns")
-    .select("id, display_label, source_field, column_order")
+    .select("id, region_id, display_label, source_field, column_order")
     .eq("template_id", id)
     .order("column_order", { ascending: true });
 
   const columns = (columnsData || []) as TemplateColumn[];
+
+  const { data: totalsData } = await supabase
+    .from("oc_template_totals")
+    .select("id, region_id, display_label, total_key, formula_type, total_order")
+    .eq("template_id", id)
+    .order("total_order", { ascending: true });
+
+  const totals = (totalsData || []) as TemplateTotal[];
+
+  const { data: staticBlocksData } = await supabase
+    .from("oc_template_static_blocks")
+    .select(
+      "id, region_id, display_label, block_key, content, x_position, y_position, font_size"
+    )
+    .eq("template_id", id)
+    .order("display_label", { ascending: true });
+
+  const staticBlocks = (staticBlocksData || []) as StaticBlock[];
 
   if (templateError || !template) {
     return (
@@ -96,10 +161,11 @@ export default async function OCTemplateDesignerPage({
     <div className="p-10 space-y-8">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold">Template Designer</h1>
+          <h1 className="text-3xl font-bold">Template Designer V4</h1>
 
           <p className="text-sm text-gray-500 mt-1">
-            Map header fields and define table columns for this OC template.
+            Region-first template setup. Select a region, then manage fields,
+            columns, totals and static content inside that region.
           </p>
         </div>
 
@@ -135,11 +201,16 @@ export default async function OCTemplateDesignerPage({
         </div>
       </div>
 
-      <OCTemplateClickDesigner
+      <OCTemplateDesignerV4
         template={template}
+        regions={regions}
         mappings={mappings}
         columns={columns}
+        totals={totals}
+        staticBlocks={staticBlocks}
       />
+
+      <OCTemplateRegionDesigner templateId={template.id} regions={regions} />
     </div>
   );
 }

@@ -5,24 +5,16 @@ function value(formData: FormData, key: string) {
   return String(formData.get(key) || "").trim();
 }
 
-function numberValue(formData: FormData, key: string, fallback: number) {
-  const raw = Number(value(formData, key));
-  return Number.isFinite(raw) ? raw : fallback;
-}
-
 export async function POST(req: Request) {
   try {
     const formData = await req.formData();
 
     const templateId = value(formData, "template_id");
-    const regionId = value(formData, "region_id") || null;
-    const displayLabel = value(formData, "display_label");
-    const sourceField = value(formData, "source_field");
-    const columnOrder = numberValue(formData, "column_order", 1);
+    const regionId = value(formData, "region_id");
 
-    if (!templateId || !displayLabel || !sourceField) {
+    if (!templateId || !regionId) {
       return NextResponse.json(
-        { ok: false, error: "Missing template, label, or source field" },
+        { ok: false, error: "Missing template ID or region ID" },
         { status: 400 }
       );
     }
@@ -32,13 +24,10 @@ export async function POST(req: Request) {
       process.env.SUPABASE_SERVICE_ROLE_KEY!
     );
 
-    const { error } = await supabase.from("oc_template_columns").insert({
-      template_id: templateId,
-      region_id: regionId,
-      display_label: displayLabel,
-      source_field: sourceField,
-      column_order: columnOrder,
-    });
+    const { error } = await supabase
+      .from("oc_template_regions")
+      .delete()
+      .eq("id", regionId);
 
     if (error) {
       return NextResponse.json(
@@ -55,7 +44,7 @@ export async function POST(req: Request) {
     return NextResponse.json(
       {
         ok: false,
-        error: error?.message || "Failed to save template column",
+        error: error?.message || "Failed to delete template region",
       },
       { status: 500 }
     );

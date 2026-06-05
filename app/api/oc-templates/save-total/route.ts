@@ -15,14 +15,16 @@ export async function POST(req: Request) {
     const formData = await req.formData();
 
     const templateId = value(formData, "template_id");
+    const totalId = value(formData, "total_id");
     const regionId = value(formData, "region_id") || null;
-    const fieldName = value(formData, "field_name");
     const displayLabel = value(formData, "display_label");
-    const fieldType = value(formData, "field_type") || "system";
+    const totalKey = value(formData, "total_key");
+    const formulaType = value(formData, "formula_type") || "manual";
+    const totalOrder = numberValue(formData, "total_order", 1);
 
-    if (!templateId || !fieldName) {
+    if (!templateId || !displayLabel || !totalKey) {
       return NextResponse.json(
-        { ok: false, error: "Missing template ID or field name" },
+        { ok: false, error: "Missing template, display label, or total key" },
         { status: 400 }
       );
     }
@@ -30,13 +32,11 @@ export async function POST(req: Request) {
     const payload = {
       template_id: templateId,
       region_id: regionId,
-      field_name: fieldName,
-      display_label: displayLabel || fieldName,
-      field_type: fieldType,
-      page_number: numberValue(formData, "page_number", 1),
-      x_position: numberValue(formData, "x_position", 50),
-      y_position: numberValue(formData, "y_position", 750),
-      font_size: numberValue(formData, "font_size", 10),
+      display_label: displayLabel,
+      total_key: totalKey,
+      formula_type: formulaType,
+      total_order: totalOrder,
+      updated_at: new Date().toISOString(),
     };
 
     const supabase = createClient(
@@ -44,19 +44,21 @@ export async function POST(req: Request) {
       process.env.SUPABASE_SERVICE_ROLE_KEY!
     );
 
-    await supabase
-      .from("oc_template_mappings")
-      .delete()
-      .eq("template_id", templateId)
-      .eq("field_name", fieldName);
+    if (totalId) {
+      const { error } = await supabase
+        .from("oc_template_totals")
+        .update(payload)
+        .eq("id", totalId);
 
-    const { error } = await supabase.from("oc_template_mappings").insert(payload);
+      if (error) {
+        return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+      }
+    } else {
+      const { error } = await supabase.from("oc_template_totals").insert(payload);
 
-    if (error) {
-      return NextResponse.json(
-        { ok: false, error: error.message },
-        { status: 500 }
-      );
+      if (error) {
+        return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+      }
     }
 
     return NextResponse.redirect(
@@ -65,7 +67,7 @@ export async function POST(req: Request) {
     );
   } catch (error: any) {
     return NextResponse.json(
-      { ok: false, error: error?.message || "Failed to save mapping" },
+      { ok: false, error: error?.message || "Failed to save total" },
       { status: 500 }
     );
   }

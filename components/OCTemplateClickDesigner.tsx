@@ -25,11 +25,29 @@ type TemplateColumn = {
   column_order: number | null;
 };
 
+type TemplateRegion = {
+  id: string;
+  region_name: string | null;
+  display_label: string | null;
+  region_type: string | null;
+  page_number: number | null;
+  x_position: number | null;
+  y_position: number | null;
+  width: number | null;
+  height: number | null;
+  row_height: number | null;
+  column_gap: number | null;
+};
+
 type OCTemplateClickDesignerProps = {
   template: Template;
   mappings: Mapping[];
   columns: TemplateColumn[];
+  regions?: TemplateRegion[];
 };
+
+const DESIGN_WIDTH = 595;
+const DESIGN_HEIGHT = 842;
 
 const systemFields = [
   { field_name: "company_name", display_label: "Company Name" },
@@ -60,6 +78,54 @@ const sourceFields = [
   { value: "custom.composition", label: "Custom: Composition" },
 ];
 
+const regionOptions = [
+  {
+    region_name: "header_region",
+    display_label: "Header Region",
+    region_type: "header",
+  },
+  {
+    region_name: "customer_region",
+    display_label: "Customer / Messrs Region",
+    region_type: "data",
+  },
+  {
+    region_name: "shipping_region",
+    display_label: "Shipping Region",
+    region_type: "data",
+  },
+  {
+    region_name: "bank_region",
+    display_label: "Bank Details Region",
+    region_type: "data",
+  },
+  {
+    region_name: "table_region",
+    display_label: "Item Table Region",
+    region_type: "table",
+  },
+  {
+    region_name: "totals_region",
+    display_label: "Totals Region",
+    region_type: "totals",
+  },
+  {
+    region_name: "footer_region",
+    display_label: "Footer / Notes Region",
+    region_type: "footer",
+  },
+  {
+    region_name: "signature_region",
+    display_label: "Signature Region",
+    region_type: "signature",
+  },
+  {
+    region_name: "custom_visual_region",
+    display_label: "Custom Region",
+    region_type: "custom",
+  },
+];
+
 function mappingFor(mappings: Mapping[], fieldName: string) {
   return mappings.find((mapping) => mapping.field_name === fieldName) || null;
 }
@@ -77,16 +143,55 @@ function displayFieldName(fieldName: string, displayLabel?: string | null) {
   return fieldName;
 }
 
+function regionColor(regionType: string | null | undefined) {
+  if (regionType === "header") return "rgba(37, 99, 235, 0.25)";
+  if (regionType === "data") return "rgba(22, 163, 74, 0.25)";
+  if (regionType === "table") return "rgba(249, 115, 22, 0.25)";
+  if (regionType === "totals") return "rgba(147, 51, 234, 0.25)";
+  if (regionType === "footer") return "rgba(220, 38, 38, 0.25)";
+  if (regionType === "signature") return "rgba(107, 114, 128, 0.25)";
+  return "rgba(17, 24, 39, 0.2)";
+}
+
+function regionBorder(regionType: string | null | undefined) {
+  if (regionType === "header") return "rgb(37, 99, 235)";
+  if (regionType === "data") return "rgb(22, 163, 74)";
+  if (regionType === "table") return "rgb(249, 115, 22)";
+  if (regionType === "totals") return "rgb(147, 51, 234)";
+  if (regionType === "footer") return "rgb(220, 38, 38)";
+  if (regionType === "signature") return "rgb(107, 114, 128)";
+  return "rgb(17, 24, 39)";
+}
+
+function pdfToPercentX(x: number | null | undefined) {
+  return ((Number(x || 0) / DESIGN_WIDTH) * 100).toFixed(4);
+}
+
+function pdfToPercentY(y: number | null | undefined) {
+  return (100 - (Number(y || 0) / DESIGN_HEIGHT) * 100).toFixed(4);
+}
+
+function pdfToPercentWidth(width: number | null | undefined) {
+  return ((Number(width || 0) / DESIGN_WIDTH) * 100).toFixed(4);
+}
+
+function pdfToPercentHeight(height: number | null | undefined) {
+  return ((Number(height || 0) / DESIGN_HEIGHT) * 100).toFixed(4);
+}
+
 export default function OCTemplateClickDesigner({
   template,
   mappings,
   columns,
+  regions = [],
 }: OCTemplateClickDesignerProps) {
   const customMappings = mappings.filter(
     (mapping) => mapping.field_type === "custom"
   );
 
   const initialField = systemFields[0].field_name;
+
+  const [mode, setMode] = useState<"field" | "region">("field");
 
   const [selectedField, setSelectedField] = useState(initialField);
   const [fieldType, setFieldType] = useState<"system" | "custom">("system");
@@ -102,6 +207,24 @@ export default function OCTemplateClickDesigner({
   const [columnOrder, setColumnOrder] = useState(
     columns.length > 0 ? columns.length + 1 : 1
   );
+
+  const [selectedRegionName, setSelectedRegionName] = useState("table_region");
+  const [selectedRegionLabel, setSelectedRegionLabel] = useState("Item Table Region");
+  const [selectedRegionType, setSelectedRegionType] = useState("table");
+
+  const [dragging, setDragging] = useState(false);
+  const [dragStart, setDragStart] = useState<{ x: number; y: number } | null>(
+    null
+  );
+  const [dragCurrent, setDragCurrent] = useState<{ x: number; y: number } | null>(
+    null
+  );
+  const [drawnRegion, setDrawnRegion] = useState<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  } | null>(null);
 
   const selectedMapping = useMemo(
     () => mappingFor(mappings, selectedField),
@@ -143,35 +266,154 @@ export default function OCTemplateClickDesigner({
     setCustomLabel("");
   }
 
-  function handlePreviewClick(event: React.MouseEvent<HTMLDivElement>) {
+  function handleRegionOptionChange(value: string) {
+    const option =
+      regionOptions.find((region) => region.region_name === value) ||
+      regionOptions[0];
+
+    setSelectedRegionName(option.region_name);
+    setSelectedRegionLabel(option.display_label);
+    setSelectedRegionType(option.region_type);
+  }
+
+  function getRelativePoint(event: React.MouseEvent<HTMLDivElement>) {
     const rect = event.currentTarget.getBoundingClientRect();
 
     const clickX = event.clientX - rect.left;
-    const clickYFromTop = event.clientY - rect.top;
+    const clickY = event.clientY - rect.top;
 
-    const pdfWidth = 595;
-    const pdfHeight = 842;
+    const x = (clickX / rect.width) * DESIGN_WIDTH;
+    const y = DESIGN_HEIGHT - (clickY / rect.height) * DESIGN_HEIGHT;
 
-    const x = (clickX / rect.width) * pdfWidth;
-    const y = pdfHeight - (clickYFromTop / rect.height) * pdfHeight;
-
-    setXPosition(Number(x.toFixed(1)));
-    setYPosition(Number(y.toFixed(1)));
+    return {
+      x: Number(x.toFixed(1)),
+      y: Number(y.toFixed(1)),
+      screenX: clickX,
+      screenY: clickY,
+      rectWidth: rect.width,
+      rectHeight: rect.height,
+    };
   }
+
+  function handlePreviewClick(event: React.MouseEvent<HTMLDivElement>) {
+    if (mode !== "field") return;
+
+    const point = getRelativePoint(event);
+
+    setXPosition(point.x);
+    setYPosition(point.y);
+  }
+
+  function handleMouseDown(event: React.MouseEvent<HTMLDivElement>) {
+    if (mode !== "region") return;
+
+    const point = getRelativePoint(event);
+
+    setDragging(true);
+    setDragStart({ x: point.screenX, y: point.screenY });
+    setDragCurrent({ x: point.screenX, y: point.screenY });
+    setDrawnRegion(null);
+  }
+
+  function handleMouseMove(event: React.MouseEvent<HTMLDivElement>) {
+    if (mode !== "region" || !dragging || !dragStart) return;
+
+    const point = getRelativePoint(event);
+
+    setDragCurrent({ x: point.screenX, y: point.screenY });
+  }
+
+  function handleMouseUp(event: React.MouseEvent<HTMLDivElement>) {
+    if (mode !== "region" || !dragging || !dragStart) return;
+
+    const rect = event.currentTarget.getBoundingClientRect();
+    const point = getRelativePoint(event);
+
+    const startScreenX = dragStart.x;
+    const startScreenY = dragStart.y;
+    const endScreenX = point.screenX;
+    const endScreenY = point.screenY;
+
+    const leftScreen = Math.min(startScreenX, endScreenX);
+    const topScreen = Math.min(startScreenY, endScreenY);
+    const widthScreen = Math.abs(endScreenX - startScreenX);
+    const heightScreen = Math.abs(endScreenY - startScreenY);
+
+    const x = (leftScreen / rect.width) * DESIGN_WIDTH;
+    const yTopPdf = DESIGN_HEIGHT - (topScreen / rect.height) * DESIGN_HEIGHT;
+    const width = (widthScreen / rect.width) * DESIGN_WIDTH;
+    const height = (heightScreen / rect.height) * DESIGN_HEIGHT;
+    const y = yTopPdf - height;
+
+    setDrawnRegion({
+      x: Number(x.toFixed(1)),
+      y: Number(y.toFixed(1)),
+      width: Number(width.toFixed(1)),
+      height: Number(height.toFixed(1)),
+    });
+
+    setDragging(false);
+    setDragStart(null);
+    setDragCurrent(null);
+  }
+
+  function currentDragBox() {
+    if (!dragStart || !dragCurrent) return null;
+
+    const left = Math.min(dragStart.x, dragCurrent.x);
+    const top = Math.min(dragStart.y, dragCurrent.y);
+    const width = Math.abs(dragCurrent.x - dragStart.x);
+    const height = Math.abs(dragCurrent.y - dragStart.y);
+
+    return { left, top, width, height };
+  }
+
+  const dragBox = currentDragBox();
 
   return (
     <div className="grid grid-cols-1 xl:grid-cols-2 gap-8">
       <div className="bg-white border rounded-xl p-6 space-y-4">
-        <h2 className="text-xl font-semibold">Click Template Position</h2>
+        <h2 className="text-xl font-semibold">Visual Template Mapping</h2>
 
         <p className="text-sm text-gray-600">
-          Select or create a field, then click the approximate position on the
-          template. The X/Y coordinates will be captured automatically.
+          Use Field Mode to click exact text positions. Use Region Mode to drag
+          rectangles for table, totals, footer, signature and custom blocks.
         </p>
+
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={() => setMode("field")}
+            className={`px-4 py-2 rounded-lg border text-sm ${
+              mode === "field"
+                ? "bg-gray-700 text-white"
+                : "bg-white text-gray-900 hover:bg-gray-100"
+            }`}
+          >
+            Field Mode
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setMode("region")}
+            className={`px-4 py-2 rounded-lg border text-sm ${
+              mode === "region"
+                ? "bg-gray-700 text-white"
+                : "bg-white text-gray-900 hover:bg-gray-100"
+            }`}
+          >
+            Region Mode
+          </button>
+        </div>
 
         <div
           onClick={handlePreviewClick}
-          className="relative w-full h-[900px] border rounded-lg overflow-hidden bg-gray-100 cursor-crosshair"
+          onMouseDown={handleMouseDown}
+          onMouseMove={handleMouseMove}
+          onMouseUp={handleMouseUp}
+          className={`relative w-full h-[900px] border rounded-lg overflow-hidden bg-gray-100 ${
+            mode === "region" ? "cursor-crosshair" : "cursor-pointer"
+          }`}
         >
           {template.template_url ? (
             <iframe
@@ -182,21 +424,116 @@ export default function OCTemplateClickDesigner({
             <div className="p-6 text-gray-500">No PDF available.</div>
           )}
 
-          {xPosition !== "" && yPosition !== "" && (
+          {regions.map((region) => (
+            <div
+              key={region.id}
+              className="absolute border-2 text-[10px] font-semibold px-1 overflow-hidden"
+              style={{
+                left: `${pdfToPercentX(region.x_position)}%`,
+                top: `${pdfToPercentY(
+                  Number(region.y_position || 0) + Number(region.height || 0)
+                )}%`,
+                width: `${pdfToPercentWidth(region.width)}%`,
+                height: `${pdfToPercentHeight(region.height)}%`,
+                backgroundColor: regionColor(region.region_type),
+                borderColor: regionBorder(region.region_type),
+                color: regionBorder(region.region_type),
+              }}
+            >
+              {region.display_label || region.region_name}
+            </div>
+          ))}
+
+          {mode === "field" && xPosition !== "" && yPosition !== "" && (
             <div
               className="absolute w-4 h-4 rounded-full bg-red-600 border-2 border-white shadow"
               style={{
-                left: `calc(${(Number(xPosition) / 595) * 100}% - 8px)`,
-                top: `calc(${100 - (Number(yPosition) / 842) * 100}% - 8px)`,
+                left: `calc(${(Number(xPosition) / DESIGN_WIDTH) * 100}% - 8px)`,
+                top: `calc(${
+                  100 - (Number(yPosition) / DESIGN_HEIGHT) * 100
+                }% - 8px)`,
+              }}
+            />
+          )}
+
+          {dragBox && (
+            <div
+              className="absolute border-2 border-dashed border-blue-700 bg-blue-200/30"
+              style={{
+                left: dragBox.left,
+                top: dragBox.top,
+                width: dragBox.width,
+                height: dragBox.height,
+              }}
+            />
+          )}
+
+          {drawnRegion && (
+            <div
+              className="absolute border-2 border-dashed border-black bg-black/10"
+              style={{
+                left: `${pdfToPercentX(drawnRegion.x)}%`,
+                top: `${pdfToPercentY(drawnRegion.y + drawnRegion.height)}%`,
+                width: `${pdfToPercentWidth(drawnRegion.width)}%`,
+                height: `${pdfToPercentHeight(drawnRegion.height)}%`,
               }}
             />
           )}
         </div>
 
         <div className="text-xs text-gray-500">
-          Coordinates use A4 PDF points: width 595, height 842. You can
-          fine-tune values manually after clicking.
+          Coordinates use A4 PDF points: width 595, height 842. Use Region Mode
+          to drag a rectangle and save it below.
         </div>
+
+        {drawnRegion && (
+          <div className="border rounded-xl p-4 space-y-4 bg-gray-50">
+            <h3 className="font-semibold text-sm">Save Drawn Region</h3>
+
+            <form action="/api/oc-templates/save-region" method="POST" className="space-y-4">
+              <input type="hidden" name="template_id" value={template.id} />
+              <input type="hidden" name="region_name" value={selectedRegionName} />
+              <input type="hidden" name="display_label" value={selectedRegionLabel} />
+              <input type="hidden" name="region_type" value={selectedRegionType} />
+              <input type="hidden" name="page_number" value="1" />
+              <input type="hidden" name="x_position" value={drawnRegion.x} />
+              <input type="hidden" name="y_position" value={drawnRegion.y} />
+              <input type="hidden" name="width" value={drawnRegion.width} />
+              <input type="hidden" name="height" value={drawnRegion.height} />
+
+              <div>
+                <label className="block text-sm font-medium mb-1">
+                  Assign Region
+                </label>
+
+                <select
+                  value={selectedRegionName}
+                  onChange={(event) =>
+                    handleRegionOptionChange(event.target.value)
+                  }
+                  className="w-full border border-gray-300 rounded-lg px-4 py-3 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-gray-300"
+                >
+                  {regionOptions.map((region) => (
+                    <option key={region.region_name} value={region.region_name}>
+                      {region.display_label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+                <div>X: {drawnRegion.x}</div>
+                <div>Y: {drawnRegion.y}</div>
+                <div>W: {drawnRegion.width}</div>
+                <div>H: {drawnRegion.height}</div>
+              </div>
+
+              <button className="px-4 py-2 rounded-lg bg-gray-700 hover:bg-gray-800 text-white text-sm">
+                Save Drawn Region
+              </button>
+            </form>
+          </div>
+        )}
       </div>
 
       <div className="space-y-8">
