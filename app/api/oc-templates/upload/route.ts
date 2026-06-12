@@ -10,14 +10,19 @@ function safeFileName(name: string) {
     .slice(0, 120);
 }
 
+function isPdfBuffer(buffer: Buffer) {
+  return buffer.slice(0, 4).toString("utf8") === "%PDF";
+}
+
 export async function POST(req: NextRequest) {
   try {
     const formData = await req.formData();
 
-    const sellerProfileId = String(formData.get("seller_profile_id") || "").trim();
+    const sellerProfileId = String(
+      formData.get("seller_profile_id") || ""
+    ).trim();
     const companyName = String(formData.get("company_name") || "").trim();
     const templateName = String(formData.get("template_name") || "").trim();
-    const templateType = String(formData.get("template_type") || "blank").trim();
     const file = formData.get("template_file") as File | null;
 
     if (!sellerProfileId) {
@@ -41,23 +46,44 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    if (templateType !== "blank" && templateType !== "sample") {
-      return NextResponse.json(
-        { ok: false, error: "Invalid template type" },
-        { status: 400 }
-      );
-    }
-
     if (!file) {
       return NextResponse.json(
-        { ok: false, error: "Missing template PDF" },
+        { ok: false, error: "Missing blank OC template PDF" },
         { status: 400 }
       );
     }
 
     if (file.type !== "application/pdf") {
       return NextResponse.json(
-        { ok: false, error: "Only PDF templates are allowed" },
+        {
+          ok: false,
+          error:
+            "Only PDF files are allowed. Please upload a blank OC template PDF.",
+        },
+        { status: 400 }
+      );
+    }
+
+    if (!file.name.toLowerCase().endsWith(".pdf")) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error:
+            "The template file must be a PDF. Please upload a blank OC template PDF.",
+        },
+        { status: 400 }
+      );
+    }
+
+    const buffer = Buffer.from(await file.arrayBuffer());
+
+    if (!isPdfBuffer(buffer)) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error:
+            "Invalid PDF file. Please upload a valid blank OC template PDF.",
+        },
         { status: 400 }
       );
     }
@@ -67,7 +93,6 @@ export async function POST(req: NextRequest) {
       process.env.SUPABASE_SERVICE_ROLE_KEY!
     );
 
-    const buffer = Buffer.from(await file.arrayBuffer());
     const storagePath = `templates/${Date.now()}-${safeFileName(file.name)}`;
 
     const { error: uploadError } = await supabase.storage
@@ -98,7 +123,8 @@ export async function POST(req: NextRequest) {
       seller_profile_id: sellerProfileId,
       company_name: companyName,
       template_name: templateName,
-      template_type: templateType,
+      template_type: "blank",
+      template_status: "draft",
       template_url: publicUrlData.publicUrl,
       storage_path: storagePath,
       is_active: true,

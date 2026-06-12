@@ -21,6 +21,13 @@ type SellerProfile = {
   company_name: string | null;
 };
 
+type AIDraft = {
+  id: string;
+  template_id: string | null;
+  status: string | null;
+  created_at: string | null;
+};
+
 function formatDateTime(value: string | null) {
   if (!value) return "";
 
@@ -45,8 +52,12 @@ function sellerNameFor(template: OCTemplate, sellers: SellerProfile[]) {
 }
 
 function templateTypeLabel(type: string | null) {
-  if (type === "sample") return "Sample Completed OC";
-  return "Blank Template";
+  if (type === "blank") return "Blank PDF Template";
+  return "Blank PDF Template";
+}
+
+function latestDraftFor(templateId: string, drafts: AIDraft[]) {
+  return drafts.find((draft) => draft.template_id === templateId) || null;
 }
 
 const inputClass =
@@ -72,8 +83,14 @@ export default async function OCTemplatesPage() {
     .order("is_default", { ascending: false })
     .order("company_name", { ascending: true });
 
+  const { data: draftsData } = await supabase
+    .from("oc_template_ai_drafts")
+    .select("id, template_id, status, created_at")
+    .order("created_at", { ascending: false });
+
   const templates = (templatesData || []) as OCTemplate[];
   const sellers = (sellersData || []) as SellerProfile[];
+  const drafts = (draftsData || []) as AIDraft[];
 
   return (
     <div className="p-10 space-y-8">
@@ -81,8 +98,9 @@ export default async function OCTemplatesPage() {
         <div>
           <h1 className="text-3xl font-bold">OC Templates</h1>
           <p className="text-sm text-gray-500 mt-1">
-            Upload blank formats or sample completed OCs, then map fields for
-            template-based PDF generation.
+            Upload blank PDF Order Confirmation templates. Order Engine will use
+            AI to map the layout and later fill real order data into the
+            approved template.
           </p>
         </div>
 
@@ -116,14 +134,28 @@ export default async function OCTemplatesPage() {
         </div>
       )}
 
-      <div className="bg-white border rounded-xl p-6 space-y-4">
-        <h2 className="text-xl font-semibold">Upload Seller OC Format</h2>
+      <div className="bg-white border rounded-xl p-6 space-y-5">
+        <div>
+          <h2 className="text-xl font-semibold">Upload Blank OC Template</h2>
+          <p className="text-sm text-gray-600 mt-1">
+            Upload a blank PDF template only. It can include your logo, company
+            details, fixed labels, table structure, terms, footer and signature
+            box.
+          </p>
+        </div>
 
-        <p className="text-sm text-gray-600">
-          Upload either a blank OC format or a sample completed OC. Blank
-          templates are ideal. Sample completed OCs can also be used, and mapped
-          fields can later cover old sample values with white boxes.
-        </p>
+        <div className="p-4 rounded-lg bg-yellow-50 text-yellow-900 border border-yellow-200 text-sm space-y-2">
+          <div className="font-semibold">Important upload rule</div>
+          <p>
+            Do not upload a completed OC with old customer names, PO numbers,
+            article values, prices or amounts. Completed OCs are harder to clean
+            and may leave old values inside the generated template.
+          </p>
+          <p>
+            Best format: a blank PDF OC template with labels and empty spaces
+            where Order Engine should insert values later.
+          </p>
+        </div>
 
         <form
           action="/api/oc-templates/upload"
@@ -151,16 +183,7 @@ export default async function OCTemplatesPage() {
             </select>
           </div>
 
-          <div>
-            <label className="block text-sm font-medium mb-1">
-              Template Type
-            </label>
-
-            <select name="template_type" required className={inputClass}>
-              <option value="blank">Blank Template</option>
-              <option value="sample">Sample Completed OC</option>
-            </select>
-          </div>
+          <input type="hidden" name="template_type" value="blank" />
 
           <div>
             <label className="block text-sm font-medium mb-1">
@@ -181,30 +204,34 @@ export default async function OCTemplatesPage() {
             <input
               name="template_name"
               required
-              placeholder="Default OC Format"
+              placeholder="Default Blank OC Format"
               className={inputClass}
             />
           </div>
 
           <div>
             <label className="block text-sm font-medium mb-1">
-              Upload PDF
+              Upload Blank PDF Template
             </label>
             <input
               name="template_file"
               type="file"
-              accept="application/pdf"
+              accept="application/pdf,.pdf"
               required
               className={inputClass}
               disabled={sellers.length === 0}
             />
+            <p className="text-xs text-gray-500 mt-2">
+              PDF only. Upload a blank OC format, not a completed order
+              confirmation.
+            </p>
           </div>
 
           <button
             className="px-5 py-3 rounded-lg bg-gray-700 hover:bg-gray-800 text-white text-sm disabled:opacity-50"
             disabled={sellers.length === 0}
           >
-            Upload Template
+            Upload Blank Template
           </button>
         </form>
       </div>
@@ -221,6 +248,7 @@ export default async function OCTemplatesPage() {
                 <th className="p-3 border text-left">Company</th>
                 <th className="p-3 border text-left">Template</th>
                 <th className="p-3 border text-left">Type</th>
+                <th className="p-3 border text-left">AI Draft</th>
                 <th className="p-3 border text-left">Status</th>
                 <th className="p-3 border text-left">Actions</th>
               </tr>
@@ -229,67 +257,111 @@ export default async function OCTemplatesPage() {
             <tbody>
               {templates.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="p-6 text-center text-gray-500">
+                  <td colSpan={8} className="p-6 text-center text-gray-500">
                     No OC templates uploaded yet
                   </td>
                 </tr>
               ) : (
-                templates.map((template) => (
-                  <tr key={template.id} className="hover:bg-gray-50">
-                    <td className="p-3 border whitespace-nowrap">
-                      {formatDateTime(template.created_at)}
-                    </td>
+                templates.map((template) => {
+                  const draft = latestDraftFor(template.id, drafts);
 
-                    <td className="p-3 border">
-                      {sellerNameFor(template, sellers) || "Unassigned"}
-                    </td>
+                  return (
+                    <tr key={template.id} className="hover:bg-gray-50">
+                      <td className="p-3 border whitespace-nowrap">
+                        {formatDateTime(template.created_at)}
+                      </td>
 
-                    <td className="p-3 border">
-                      {template.company_name || ""}
-                    </td>
+                      <td className="p-3 border">
+                        {sellerNameFor(template, sellers) || "Unassigned"}
+                      </td>
 
-                    <td className="p-3 border">
-                      {template.template_name || ""}
-                    </td>
+                      <td className="p-3 border">
+                        {template.company_name || ""}
+                      </td>
 
-                    <td className="p-3 border">
-                      {templateTypeLabel(template.template_type)}
-                    </td>
+                      <td className="p-3 border">
+                        {template.template_name || ""}
+                      </td>
 
-                    <td className="p-3 border">
-                      {template.is_active ? (
-                        <span className="px-2 py-1 rounded bg-gray-100 text-gray-700 text-xs border">
-                          Active
-                        </span>
-                      ) : (
-                        <span className="px-2 py-1 rounded bg-gray-50 text-gray-500 text-xs border">
-                          Inactive
-                        </span>
-                      )}
-                    </td>
+                      <td className="p-3 border">
+                        {templateTypeLabel(template.template_type)}
+                      </td>
 
-                    <td className="p-3 border">
-                      <div className="flex gap-2 flex-wrap">
-                        {template.template_url && (
-                          <a
-                            href={template.template_url}
-                            target="_blank"
-                            className="px-4 py-2 rounded-lg bg-gray-100 text-gray-900 border hover:bg-gray-200"
+                      <td className="p-3 border">
+                        {draft ? (
+                          <Link
+                            href={`/oc-templates/${template.id}/ai-review?draft=${draft.id}`}
+                            className="text-blue-700 hover:underline"
                           >
-                            View PDF
-                          </a>
+                            {draft.status || "draft"}
+                          </Link>
+                        ) : (
+                          <span className="text-gray-400">None</span>
                         )}
+                      </td>
 
-                        <Link
-                          href={`/oc-templates/${template.id}/designer`}
-                          className="px-4 py-2 rounded-lg bg-gray-200 text-gray-900 border border-gray-300 hover:bg-gray-300"
-                        >
-                          Design Template
-                        </Link>
-                      </div>
-                    </td>
-                  </tr>
-                ))
+                      <td className="p-3 border">
+                        {template.is_active ? (
+                          <span className="px-2 py-1 rounded bg-gray-100 text-gray-700 text-xs border">
+                            Active
+                          </span>
+                        ) : (
+                          <span className="px-2 py-1 rounded bg-gray-50 text-gray-500 text-xs border">
+                            Inactive
+                          </span>
+                        )}
+                      </td>
+
+                      <td className="p-3 border">
+                        <div className="flex gap-2 flex-wrap">
+                          {template.template_url && (
+                            <a
+                              href={template.template_url}
+                              target="_blank"
+                              className="px-4 py-2 rounded-lg bg-gray-100 text-gray-900 border hover:bg-gray-200"
+                            >
+                              View PDF
+                            </a>
+                          )}
+
+                          <form
+                            action="/api/oc-templates/analyze-with-ai"
+                            method="POST"
+                          >
+                            <input
+                              type="hidden"
+                              name="template_id"
+                              value={template.id}
+                            />
+
+                            <button className="px-4 py-2 rounded-lg bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100">
+                              Analyze with AI
+                            </button>
+                          </form>
+
+                          <Link
+                            href={`/oc-templates/${template.id}/designer`}
+                            className="px-4 py-2 rounded-lg bg-gray-200 text-gray-900 border border-gray-300 hover:bg-gray-300"
+                          >
+                            Edit Template
+                          </Link>
+
+                          <form action="/api/oc-templates/delete" method="POST">
+                            <input
+                              type="hidden"
+                              name="template_id"
+                              value={template.id}
+                            />
+
+                            <button className="px-4 py-2 rounded-lg bg-red-50 text-red-700 border border-red-200 hover:bg-red-100">
+                              Delete
+                            </button>
+                          </form>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
               )}
             </tbody>
           </table>

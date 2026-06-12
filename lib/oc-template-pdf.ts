@@ -5,37 +5,54 @@ type Template = {
   template_url: string | null;
   storage_path: string | null;
   template_type: string | null;
-  default_font: string | null;
-  default_font_size: number | null;
-  default_text_color: string | null;
+  default_font?: string | null;
+  default_font_size?: number | null;
+  default_text_color?: string | null;
 };
 
 type Mapping = {
-  id: string;
+  id?: string;
   field_name: string | null;
-  display_label: string | null;
-  field_type: string | null;
-  page_number: number | null;
+  display_label?: string | null;
+  field_type?: string | null;
+  page_number?: number | null;
   x_position: number | null;
   y_position: number | null;
-  font_size: number | null;
-  background_fill: string | null;
-  background_width: number | null;
-  background_height: number | null;
+  width?: number | null;
+  height?: number | null;
+  x_percent?: number | null;
+  y_percent?: number | null;
+  width_percent?: number | null;
+  height_percent?: number | null;
+  font_size?: number | null;
+  background_fill?: string | null;
+  background_width?: number | null;
+  background_height?: number | null;
 };
 
 type TemplateColumn = {
-  id: string;
+  id?: string;
   display_label: string | null;
   source_field: string | null;
   column_order: number | null;
+  mapped_to?: string | null;
+  x_position?: number | null;
+  y_position?: number | null;
+  width?: number | null;
+  height?: number | null;
+  x_percent?: number | null;
+  y_percent?: number | null;
+  width_percent?: number | null;
+  height_percent?: number | null;
+  font_size?: number | null;
+  row_height?: number | null;
 };
 
 type SellerProfile = {
   company_name: string | null;
   email: string | null;
   phone: string | null;
-  website: string | null;
+  website?: string | null;
   address_line_1: string | null;
   address_line_2: string | null;
   city: string | null;
@@ -43,13 +60,19 @@ type SellerProfile = {
   country: string | null;
   postal_code: string | null;
   gst_number: string | null;
-  pan_number: string | null;
-  iec_number: string | null;
+  pan_number?: string | null;
+  iec_number?: string | null;
+  bank_name?: string | null;
+  account_name?: string | null;
+  account_number?: string | null;
+  swift_code?: string | null;
+  ifsc_code?: string | null;
+  logo_url?: string | null;
 };
 
 type Customer = {
   company_name: string | null;
-  contact_person: string | null;
+  contact_person?: string | null;
   email: string | null;
   phone: string | null;
   address_line_1: string | null;
@@ -58,9 +81,9 @@ type Customer = {
   state: string | null;
   country: string | null;
   postal_code: string | null;
-  gst_number: string | null;
-  pan_number: string | null;
-  iec_number: string | null;
+  gst_number?: string | null;
+  pan_number?: string | null;
+  iec_number?: string | null;
 };
 
 type OrderConfirmation = {
@@ -68,11 +91,17 @@ type OrderConfirmation = {
   oc_number: string | null;
   oc_date: string | null;
   po_number: string | null;
+  po_date?: string | null;
+  reference?: string | null;
   delivery_date: string | null;
   payment_terms: string | null;
   shipment_terms: string | null;
+  shipping_address?: string | null;
+  shipping_instructions?: string | null;
+  attention_of?: string | null;
   internal_notes: string | null;
   customer_notes: string | null;
+  total_amount?: string | number | null;
 };
 
 type OCLineItem = {
@@ -86,20 +115,58 @@ type OCLineItem = {
   custom_fields: Record<string, any> | null;
 };
 
+type AIAnalysis = {
+  fields?: any[];
+  columns?: any[];
+  totals?: any[];
+  logos?: any[];
+  static_blocks?: any[];
+};
+
 type GenerateTemplatePdfParams = {
   template: Template;
-  mappings: Mapping[];
-  columns: TemplateColumn[];
+  mappings?: Mapping[];
+  columns?: TemplateColumn[];
   seller: SellerProfile | null;
   customer: Customer | null;
   oc: OrderConfirmation;
   lineItems: OCLineItem[];
   templateBytes: ArrayBuffer;
+  analysis?: AIAnalysis | null;
 };
 
 function clean(value: string | number | null | undefined) {
   if (value === null || value === undefined) return "";
   return String(value).trim();
+}
+
+function asArray(value: any) {
+  return Array.isArray(value) ? value : [];
+}
+
+function numberOrFallback(value: any, fallback: number) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : fallback;
+}
+
+function percentOrNull(value: any) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
+function fromPercentOrValue(params: {
+  percent: any;
+  value: any;
+  pageSize: number;
+  fallback: number;
+}) {
+  const percent = percentOrNull(params.percent);
+
+  if (percent !== null) {
+    return percent * params.pageSize;
+  }
+
+  return numberOrFallback(params.value, params.fallback);
 }
 
 function formatDate(value: string | null | undefined) {
@@ -143,83 +210,309 @@ function getFontName(fontName: string | null | undefined) {
   return StandardFonts.Helvetica;
 }
 
-function mappingValue(params: {
-  fieldName: string;
+function mappedValue(row: any) {
+  return clean(
+    row?.mapped_to ||
+      row?.source_field ||
+      row?.field_name ||
+      row?.total_key ||
+      row?.block_key ||
+      ""
+  );
+}
+
+function normalizeMappedPath(path: string) {
+  const value = clean(path);
+
+  const legacyMap: Record<string, string> = {
+    company_name: "seller.company_name",
+    seller_name: "seller.company_name",
+    seller_email: "seller.email",
+    seller_phone: "seller.phone",
+    seller_website: "seller.website",
+    seller_address: "seller.address",
+    seller_gst: "seller.gst_no",
+    seller_pan: "seller.pan_number",
+    seller_iec: "seller.iec_number",
+    customer_name: "customer.name",
+    customer_contact: "customer.contact_person",
+    customer_email: "customer.email",
+    customer_phone: "customer.phone",
+    customer_address: "customer.address",
+    customer_gst: "customer.gst_number",
+    customer_pan: "customer.pan_number",
+    customer_iec: "customer.iec_number",
+    oc_number: "order.oc_number",
+    oc_date: "order.oc_date",
+    po_number: "order.po_number",
+    delivery_date: "order.delivery_date",
+    payment_terms: "order.payment_terms",
+    shipment_terms: "order.shipment_terms",
+    internal_notes: "order.internal_notes",
+    customer_notes: "order.customer_notes",
+  };
+
+  return legacyMap[value] || value;
+}
+
+function getPathValue(params: {
+  path: string;
   seller: SellerProfile | null;
   customer: Customer | null;
   oc: OrderConfirmation;
 }) {
-  const { fieldName, seller, customer, oc } = params;
-
-  const customerAddress = joinAddress([
-    customer?.address_line_1,
-    customer?.address_line_2,
-    customer?.city,
-    customer?.state,
-    customer?.country,
-    customer?.postal_code,
-  ]);
+  const { path, seller, customer, oc } = params;
+  const mapped = normalizeMappedPath(path);
 
   const sellerAddress = joinAddress([
     seller?.address_line_1,
     seller?.address_line_2,
     seller?.city,
     seller?.state,
-    seller?.country,
     seller?.postal_code,
+    seller?.country,
+  ]);
+
+  const customerAddress = joinAddress([
+    customer?.address_line_1,
+    customer?.address_line_2,
+    customer?.city,
+    customer?.state,
+    customer?.postal_code,
+    customer?.country,
   ]);
 
   const values: Record<string, string> = {
-    company_name: clean(seller?.company_name),
-    seller_name: clean(seller?.company_name),
-    seller_email: clean(seller?.email),
-    seller_phone: clean(seller?.phone),
-    seller_website: clean(seller?.website),
-    seller_address: sellerAddress,
-    seller_gst: clean(seller?.gst_number),
-    seller_pan: clean(seller?.pan_number),
-    seller_iec: clean(seller?.iec_number),
+    "seller.company_name": clean(seller?.company_name),
+    "seller.address": sellerAddress,
+    "seller.email": clean(seller?.email),
+    "seller.phone": clean(seller?.phone),
+    "seller.website": clean(seller?.website),
+    "seller.gst_no": clean(seller?.gst_number),
+    "seller.pan_number": clean(seller?.pan_number),
+    "seller.iec_number": clean(seller?.iec_number),
+    "seller.bank_name": clean(seller?.bank_name),
+    "seller.account_name": clean(seller?.account_name),
+    "seller.account_number": clean(seller?.account_number),
+    "seller.swift_code": clean(seller?.swift_code),
+    "seller.ifsc_code": clean(seller?.ifsc_code),
 
-    customer_name: clean(customer?.company_name),
-    customer_contact: clean(customer?.contact_person),
-    customer_email: clean(customer?.email),
-    customer_phone: clean(customer?.phone),
-    customer_address: customerAddress,
-    customer_gst: clean(customer?.gst_number),
-    customer_pan: clean(customer?.pan_number),
-    customer_iec: clean(customer?.iec_number),
+    "customer.name": clean(customer?.company_name),
+    "customer.company_name": clean(customer?.company_name),
+    "customer.contact_person": clean(customer?.contact_person),
+    "customer.address": customerAddress,
+    "customer.email": clean(customer?.email),
+    "customer.phone": clean(customer?.phone),
+    "customer.country": clean(customer?.country),
+    "customer.gst_number": clean(customer?.gst_number),
+    "customer.pan_number": clean(customer?.pan_number),
+    "customer.iec_number": clean(customer?.iec_number),
 
-    oc_number: clean(oc.oc_number),
-    oc_date: formatDate(oc.oc_date),
-    po_number: clean(oc.po_number),
-    delivery_date: formatDate(oc.delivery_date),
-    payment_terms: clean(oc.payment_terms),
-    shipment_terms: clean(oc.shipment_terms),
-    internal_notes: clean(oc.internal_notes),
-    customer_notes: clean(oc.customer_notes),
+    "agent.name": "CHIH FAN TEXTILE CO. LTD.(A)",
+    "agent.company": "CHIH FAN TEXTILE CO. LTD.(A)",
+
+    "order.oc_number": clean(oc.oc_number),
+    "order.oc_date": formatDate(oc.oc_date),
+    "order.po_number": clean(oc.po_number),
+    "order.po_date": formatDate(oc.po_date),
+    "order.reference": clean(oc.reference),
+    "order.delivery_date": formatDate(oc.delivery_date),
+    "order.payment_terms": clean(oc.payment_terms),
+    "order.shipment_terms": clean(oc.shipment_terms),
+    "order.shipping_address": clean(oc.shipping_address),
+    "order.shipping_instructions": clean(oc.shipping_instructions),
+    "order.attention_of": clean(oc.attention_of),
+    "order.internal_notes": clean(oc.internal_notes),
+    "order.customer_notes": clean(oc.customer_notes),
+    "order.notes": clean(oc.customer_notes || oc.internal_notes),
+    "order.total_amount": clean(oc.total_amount),
+
+    "manual.agent_name": "CHIH FAN TEXTILE CO. LTD.(A)",
+    "manual.attention_of": clean(oc.attention_of),
+    "manual.notes": clean(oc.customer_notes || oc.internal_notes),
+    "manual.custom_text": "",
   };
 
-  return values[fieldName] || "";
+  return values[mapped] || "";
 }
 
 function getLineValue(line: OCLineItem, sourceField: string | null | undefined) {
-  const field = clean(sourceField);
+  const field = normalizeMappedPath(clean(sourceField));
 
   if (!field) return "";
 
-  if (field === "sku") return clean(line.sku);
-  if (field === "quantity") return clean(line.quantity);
-  if (field === "unit_price") return clean(line.unit_price);
-  if (field === "currency") return clean(line.currency);
-  if (field === "line_total") return clean(line.line_total);
-  if (field === "notes") return clean(line.notes);
+  if (field === "item.sku" || field === "sku") return clean(line.sku);
+  if (field === "item.quantity" || field === "quantity")
+    return clean(line.quantity);
+  if (field === "item.unit_price" || field === "unit_price")
+    return clean(line.unit_price);
+  if (field === "item.currency" || field === "currency")
+    return clean(line.currency);
+  if (field === "item.amount" || field === "line_total")
+    return clean(line.line_total);
+  if (field === "item.notes" || field === "notes") return clean(line.notes);
+
+  if (field === "item.article_no") {
+    return clean(line.custom_fields?.article_no || line.sku);
+  }
+
+  if (field === "item.color") return clean(line.custom_fields?.color);
+  if (field === "item.color_no") return clean(line.custom_fields?.color_no);
+  if (field === "item.size") return clean(line.custom_fields?.size);
+  if (field === "item.width") return clean(line.custom_fields?.width);
+  if (field === "item.piece_length")
+    return clean(line.custom_fields?.piece_length);
 
   if (field.startsWith("custom.")) {
     const key = field.replace("custom.", "");
     return clean(line.custom_fields?.[key]);
   }
 
+  if (field.startsWith("item.")) {
+    const key = field.replace("item.", "");
+    return clean(line.custom_fields?.[key]);
+  }
+
   return "";
+}
+
+function mappingFromAnalysisItem(params: {
+  item: any;
+  index: number;
+  pageWidth: number;
+  pageHeight: number;
+  type: "field" | "total";
+}) {
+  const { item, index, pageWidth, pageHeight, type } = params;
+  const fieldName = mappedValue(item);
+
+  return {
+    id: `ai-${type}-${index}`,
+    field_name: fieldName,
+    display_label: clean(item.display_label),
+    field_type: type === "total" ? "system" : clean(item.field_type || "system"),
+    page_number: Number(item.page_number || 1),
+    x_position: fromPercentOrValue({
+      percent: item.x_percent,
+      value: item.x_position,
+      pageSize: pageWidth,
+      fallback: 0,
+    }),
+    y_position: fromPercentOrValue({
+      percent: item.y_percent,
+      value: item.y_position,
+      pageSize: pageHeight,
+      fallback: 0,
+    }),
+    width: fromPercentOrValue({
+      percent: item.width_percent,
+      value: item.width,
+      pageSize: pageWidth,
+      fallback: 180,
+    }),
+    height: fromPercentOrValue({
+      percent: item.height_percent,
+      value: item.height,
+      pageSize: pageHeight,
+      fallback: 18,
+    }),
+    font_size: numberOrFallback(item.font_size, 8),
+    background_fill: null,
+    background_width: fromPercentOrValue({
+      percent: item.width_percent,
+      value: item.width || item.background_width,
+      pageSize: pageWidth,
+      fallback: 180,
+    }),
+    background_height: fromPercentOrValue({
+      percent: item.height_percent,
+      value: item.height || item.background_height,
+      pageSize: pageHeight,
+      fallback: 18,
+    }),
+  } as Mapping;
+}
+
+function analysisFieldsToMappings(
+  analysis: AIAnalysis | null | undefined,
+  pageWidth: number,
+  pageHeight: number
+) {
+  return asArray(analysis?.fields)
+    .filter((field: any) => mappedValue(field))
+    .map((field: any, index: number) =>
+      mappingFromAnalysisItem({
+        item: field,
+        index,
+        pageWidth,
+        pageHeight,
+        type: "field",
+      })
+    ) as Mapping[];
+}
+
+function analysisTotalsToMappings(
+  analysis: AIAnalysis | null | undefined,
+  pageWidth: number,
+  pageHeight: number
+) {
+  return asArray(analysis?.totals)
+    .filter((total: any) => mappedValue(total))
+    .map((total: any, index: number) =>
+      mappingFromAnalysisItem({
+        item: total,
+        index,
+        pageWidth,
+        pageHeight,
+        type: "total",
+      })
+    ) as Mapping[];
+}
+
+function analysisColumnsToColumns(
+  analysis: AIAnalysis | null | undefined,
+  pageWidth: number,
+  pageHeight: number
+) {
+  return asArray(analysis?.columns)
+    .filter((column: any) => mappedValue(column))
+    .map((column: any, index: number) => {
+      const mapped = mappedValue(column);
+
+      return {
+        id: `ai-column-${index}`,
+        display_label: clean(column.display_label),
+        source_field: mapped,
+        column_order: Number(column.column_order || index + 1),
+        mapped_to: mapped,
+        x_position: fromPercentOrValue({
+          percent: column.x_percent,
+          value: column.x_position,
+          pageSize: pageWidth,
+          fallback: 35 + index * 65,
+        }),
+        y_position: fromPercentOrValue({
+          percent: column.y_percent,
+          value: column.y_position,
+          pageSize: pageHeight,
+          fallback: 395,
+        }),
+        width: fromPercentOrValue({
+          percent: column.width_percent,
+          value: column.width,
+          pageSize: pageWidth,
+          fallback: 70,
+        }),
+        height: fromPercentOrValue({
+          percent: column.height_percent,
+          value: column.height,
+          pageSize: pageHeight,
+          fallback: 20,
+        }),
+        row_height: numberOrFallback(column.row_height, column.height || 20),
+        font_size: numberOrFallback(column.font_size, 8),
+      };
+    }) as TemplateColumn[];
 }
 
 export async function generateTemplateOCPdfBuffer(
@@ -227,20 +520,37 @@ export async function generateTemplateOCPdfBuffer(
 ) {
   const {
     template,
-    mappings,
-    columns,
     seller,
     customer,
     oc,
     lineItems,
     templateBytes,
+    analysis = null,
   } = params;
 
   const pdfDoc = await PDFDocument.load(templateBytes);
   const pages = pdfDoc.getPages();
+  const firstPageSize = pages[0]?.getSize() || { width: 595, height: 842 };
+
+  const pageWidth = firstPageSize.width;
+  const pageHeight = firstPageSize.height;
+
+  const mappings =
+    analysis &&
+    (asArray(analysis.fields).length > 0 || asArray(analysis.totals).length > 0)
+      ? [
+          ...analysisFieldsToMappings(analysis, pageWidth, pageHeight),
+          ...analysisTotalsToMappings(analysis, pageWidth, pageHeight),
+        ]
+      : params.mappings || [];
+
+  const columns =
+    analysis && asArray(analysis.columns).length > 0
+      ? analysisColumnsToColumns(analysis, pageWidth, pageHeight)
+      : params.columns || [];
 
   const font = await pdfDoc.embedFont(getFontName(template.default_font));
-  const defaultFontSize = Number(template.default_font_size || 10);
+  const defaultFontSize = Number(template.default_font_size || 8);
   const defaultColor = hexToRgb(template.default_text_color);
 
   for (const mapping of mappings) {
@@ -251,12 +561,33 @@ export async function generateTemplateOCPdfBuffer(
     const pageIndex = Math.max(Number(mapping.page_number || 1) - 1, 0);
     const page = pages[pageIndex] || pages[0];
 
-    const x = Number(mapping.x_position || 0);
-    const y = Number(mapping.y_position || 0);
+    const pageSize = page.getSize();
+
+    const x = fromPercentOrValue({
+      percent: mapping.x_percent,
+      value: mapping.x_position,
+      pageSize: pageSize.width,
+      fallback: 0,
+    });
+
+    const y = fromPercentOrValue({
+      percent: mapping.y_percent,
+      value: mapping.y_position,
+      pageSize: pageSize.height,
+      fallback: 0,
+    });
+
+    const width = fromPercentOrValue({
+      percent: mapping.width_percent,
+      value: mapping.width || mapping.background_width,
+      pageSize: pageSize.width,
+      fallback: 180,
+    });
+
     const size = Number(mapping.font_size || defaultFontSize);
 
-    const text = mappingValue({
-      fieldName,
+    const text = getPathValue({
+      path: fieldName,
       seller,
       customer,
       oc,
@@ -264,69 +595,62 @@ export async function generateTemplateOCPdfBuffer(
 
     if (!text) continue;
 
-    if (
-      template.template_type === "sample" &&
-      mapping.background_fill === "white"
-    ) {
-      page.drawRectangle({
-        x,
-        y: y - 2,
-        width: Number(mapping.background_width || 150),
-        height: Number(mapping.background_height || size + 6),
-        color: rgb(1, 1, 1),
-        borderWidth: 0,
-      });
-    }
-
     page.drawText(text, {
       x,
       y,
       size,
       font,
       color: defaultColor,
+      maxWidth: width,
+      lineHeight: size + 2,
     });
   }
 
-  const tableMapping = mappings.find(
-    (mapping) => mapping.field_name === "sku_table"
-  );
-
-  if (tableMapping && columns.length > 0 && lineItems.length > 0) {
-    const pageIndex = Math.max(Number(tableMapping.page_number || 1) - 1, 0);
-    const page = pages[pageIndex] || pages[0];
-
-    const startX = Number(tableMapping.x_position || 50);
-    const startY = Number(tableMapping.y_position || 500);
-    const fontSize = Number(tableMapping.font_size || defaultFontSize);
-    const rowHeight = fontSize + 8;
-    const columnWidth = 90;
-
+  if (columns.length > 0 && lineItems.length > 0) {
     const sortedColumns = [...columns].sort(
       (a, b) => Number(a.column_order || 0) - Number(b.column_order || 0)
     );
 
-    sortedColumns.forEach((column, columnIndex) => {
-      page.drawText(clean(column.display_label), {
-        x: startX + columnIndex * columnWidth,
-        y: startY,
-        size: fontSize,
-        font,
-        color: defaultColor,
+    sortedColumns.forEach((column) => {
+      const page = pages[0];
+      const pageSize = page.getSize();
+
+      const x = fromPercentOrValue({
+        percent: column.x_percent,
+        value: column.x_position,
+        pageSize: pageSize.width,
+        fallback: 50,
       });
-    });
 
-    lineItems.forEach((line, rowIndex) => {
-      const y = startY - (rowIndex + 1) * rowHeight;
+      const startY = fromPercentOrValue({
+        percent: column.y_percent,
+        value: column.y_position,
+        pageSize: pageSize.height,
+        fallback: 395,
+      });
 
-      sortedColumns.forEach((column, columnIndex) => {
-        const text = getLineValue(line, column.source_field);
+      const width = fromPercentOrValue({
+        percent: column.width_percent,
+        value: column.width,
+        pageSize: pageSize.width,
+        fallback: 70,
+      });
+
+      const fontSize = Number(column.font_size || 8);
+      const rowHeight = Number(column.row_height || column.height || 20);
+
+      lineItems.forEach((line, rowIndex) => {
+        const text = getLineValue(line, column.mapped_to || column.source_field);
+
+        if (!text) return;
 
         page.drawText(text, {
-          x: startX + columnIndex * columnWidth,
-          y,
+          x,
+          y: startY - rowIndex * rowHeight,
           size: fontSize,
           font,
           color: defaultColor,
+          maxWidth: width,
         });
       });
     });

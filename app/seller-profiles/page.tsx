@@ -12,6 +12,12 @@ type SellerProfile = {
   phone: string | null;
   city: string | null;
   country: string | null;
+  gst_number: string | null;
+  bank_name: string | null;
+  account_number: string | null;
+  swift_code: string | null;
+  logo_url: string | null;
+  signature_url: string | null;
   is_default: boolean | null;
   is_active: boolean | null;
   updated_at: string | null;
@@ -35,6 +41,18 @@ function formatDateTime(value: string | null) {
   });
 }
 
+function yesNo(value: string | null) {
+  return value ? (
+    <span className="px-2 py-1 rounded bg-green-50 text-green-700 text-xs border border-green-200">
+      Yes
+    </span>
+  ) : (
+    <span className="px-2 py-1 rounded bg-gray-50 text-gray-500 text-xs border">
+      No
+    </span>
+  );
+}
+
 export default async function SellerProfilesPage() {
   const supabase = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -44,7 +62,7 @@ export default async function SellerProfilesPage() {
   const { data, error } = await supabase
     .from("seller_profiles")
     .select(
-      "id, profile_name, company_name, email, phone, city, country, is_default, is_active, updated_at"
+      "id, profile_name, company_name, email, phone, city, country, gst_number, bank_name, account_number, swift_code, logo_url, signature_url, is_default, is_active, updated_at"
     )
     .eq("is_active", true)
     .order("is_default", { ascending: false })
@@ -58,7 +76,8 @@ export default async function SellerProfilesPage() {
         <div>
           <h1 className="text-3xl font-bold">Seller Profiles</h1>
           <p className="text-sm text-gray-500 mt-1">
-            Manage seller entities used for Order Confirmations.
+            Manage seller entities, branding, tax and bank details used for
+            Order Confirmations.
           </p>
         </div>
 
@@ -98,10 +117,13 @@ export default async function SellerProfilesPage() {
             <tr className="bg-gray-100">
               <th className="p-3 border text-left">Profile</th>
               <th className="p-3 border text-left">Company</th>
-              <th className="p-3 border text-left">Email</th>
-              <th className="p-3 border text-left">Phone</th>
-              <th className="p-3 border text-left">City</th>
-              <th className="p-3 border text-left">Country</th>
+              <th className="p-3 border text-left">Contact</th>
+              <th className="p-3 border text-left">Location</th>
+              <th className="p-3 border text-left">GST / VAT</th>
+              <th className="p-3 border text-left">Bank</th>
+              <th className="p-3 border text-left">SWIFT</th>
+              <th className="p-3 border text-left">Logo</th>
+              <th className="p-3 border text-left">Signature</th>
               <th className="p-3 border text-left">Default</th>
               <th className="p-3 border text-left">Updated</th>
               <th className="p-3 border text-left">Actions</th>
@@ -111,7 +133,7 @@ export default async function SellerProfilesPage() {
           <tbody>
             {sellerProfiles.length === 0 ? (
               <tr>
-                <td colSpan={9} className="p-6 text-center text-gray-500">
+                <td colSpan={12} className="p-6 text-center text-gray-500">
                   No seller profiles found.
                 </td>
               </tr>
@@ -126,13 +148,35 @@ export default async function SellerProfilesPage() {
                     {profile.company_name || ""}
                   </td>
 
-                  <td className="p-3 border">{profile.email || ""}</td>
+                  <td className="p-3 border">
+                    <div>{profile.email || ""}</div>
+                    <div className="text-xs text-gray-500">
+                      {profile.phone || ""}
+                    </div>
+                  </td>
 
-                  <td className="p-3 border">{profile.phone || ""}</td>
+                  <td className="p-3 border">
+                    {[profile.city, profile.country].filter(Boolean).join(", ")}
+                  </td>
 
-                  <td className="p-3 border">{profile.city || ""}</td>
+                  <td className="p-3 border">
+                    {profile.gst_number || ""}
+                  </td>
 
-                  <td className="p-3 border">{profile.country || ""}</td>
+                  <td className="p-3 border">
+                    <div>{profile.bank_name || ""}</div>
+                    <div className="text-xs text-gray-500">
+                      {profile.account_number || ""}
+                    </div>
+                  </td>
+
+                  <td className="p-3 border">{profile.swift_code || ""}</td>
+
+                  <td className="p-3 border">{yesNo(profile.logo_url)}</td>
+
+                  <td className="p-3 border">
+                    {yesNo(profile.signature_url)}
+                  </td>
 
                   <td className="p-3 border">
                     {profile.is_default ? (
