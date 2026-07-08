@@ -12,6 +12,7 @@ type Email = {
   subject: string | null;
   received_at: string | null;
   processing_status: string | null;
+direction: string | null;
   external_message_id: string | null;
   gmail_message_id: string | null;
 };
@@ -42,26 +43,15 @@ export default async function EmailsPage() {
     process.env.SUPABASE_SERVICE_ROLE_KEY!
   );
 
-  const { data, error } = await supabase
-    .from("emails")
-    .select(
-      "id, from_email, subject, received_at, processing_status, external_message_id, gmail_message_id"
-    )
-    .is("deleted_at", null)
-    .neq("processing_status", "ignored")
-    .order("received_at", { ascending: false });
-
-  if (error) {
-    return (
-      <div className="p-10">
-        <h1 className="text-3xl font-bold mb-6">Emails</h1>
-
-        <p className="text-red-600">
-          Error loading emails: {error.message}
-        </p>
-      </div>
-    );
-  }
+ const { data, error } = await supabase
+  .from("emails")
+  .select(
+    "id, from_email, subject, received_at, processing_status, direction, external_message_id, gmail_message_id"
+  )
+  .is("deleted_at", null)
+  .eq("direction", "INBOUND")
+  .neq("processing_status", "ignored")
+  .order("received_at", { ascending: false });
 
   const emails = (data || []) as Email[];
 

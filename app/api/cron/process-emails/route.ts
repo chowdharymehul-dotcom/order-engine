@@ -2,51 +2,72 @@ export const dynamic = "force-dynamic";
 
 import { NextRequest, NextResponse } from "next/server";
 
-export async function GET(req: NextRequest) {
-  const authHeader = req.headers.get("authorization");
-  const expected = `Bearer ${process.env.CRON_SECRET}`;
-
-  console.log("CRON route invoked");
-  console.log("Has auth header:", !!authHeader);
-
-  if (authHeader !== expected) {
-    console.error("CRON unauthorized");
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
+async function runStep(name: string, url: string, authHeader: string) {
   try {
-    const baseUrl = process.env.NEXT_PUBLIC_SITE_URL!;
-
-    const response = await fetch(`${baseUrl}/api/process-emails`, {
+    const response = await fetch(url, {
       method: "GET",
       headers: {
-        authorization: expected,
+        authorization: authHeader,
       },
       cache: "no-store",
     });
 
     const text = await response.text();
 
-    console.log("process-emails status:", response.status);
-    console.log("process-emails raw response:", text);
-
     let parsed: any = null;
+
     try {
       parsed = JSON.parse(text);
     } catch {
       parsed = { raw: text };
     }
 
-    return NextResponse.json({
-      ok: true,
-      processStatus: response.status,
-      processResult: parsed,
-    });
+    return {
+      name,
+      ok: response.ok,
+      status: response.status,
+      result: parsed,
+    };
   } catch (error: any) {
-    console.error("CRON execution failed:", error.message);
-    return NextResponse.json(
-      { error: error.message },
-      { status: 500 }
-    );
+    return {
+      name,
+      ok: false,
+      status: 500,
+      error: error?.message || String(error),
+    };
   }
+}
+
+export async function GET(req: NextRequest) {
+  const authHeader = req.headers.get("authorization");
+  const expected = `Bearer ${process.env.CRON_SECRET}`;
+
+  if (authHeader !== expected) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const baseUrl = process.env.NEXT_PUBLIC_SITE_URL!;
+
+  const gmailFetch = await runStep(
+    "gmail_fetch",
+    `${baseUrl}/api/gmail/fetch`,
+    expected
+  );
+
+  const outlookFetch = await runStep(
+    "outlook_fetch",
+    `${baseUrl}/api/outlook/fetch`,
+    expected
+  );
+
+  const processEmails = await runStep(
+    "process_emails",
+    `${baseUrl}/api/process-emails`,
+    expected
+  );
+
+  return NextResponse.json({
+    ok: gmailFetch.ok && outlookFetch.ok && processEmails.ok,
+    steps: [gmailFetch, outlookFetch, processEmails],
+  });
 }

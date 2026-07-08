@@ -675,13 +675,13 @@ export async function POST(req: Request) {
       );
     }
 
-    return NextResponse.redirect(
-      new URL(
-        `/oc-templates/${templateId}/ai-review?draft=${draft.id}`,
-        req.url
-      ),
-      { status: 303 }
-    );
+return NextResponse.redirect(
+  new URL(
+    `/oc-templates/${templateId}/preview?draft=${draft.id}`,
+    req.url
+  ),
+  { status: 303 }
+);
   } catch (error: any) {
     return NextResponse.json(
       {

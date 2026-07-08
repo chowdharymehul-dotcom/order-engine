@@ -28,8 +28,10 @@ type NotificationItem = {
 const navItems = [
   { href: "/", label: "Dashboard" },
   { href: "/emails", label: "Email", key: "emails" },
+  { href: "/sent-emails", label: "Sent Emails" },
   { href: "/orders", label: "Orders", key: "orders" },
   { href: "/enquiries-follow-up", label: "Enquiries & Follow Up" },
+  { href: "/sales-followups", label: "Sales Follow Ups" },
   { href: "/cancellations", label: "Cancellation" },
   { href: "/customers", label: "Customers" },
   { href: "/seller-profiles", label: "Seller Profiles" },

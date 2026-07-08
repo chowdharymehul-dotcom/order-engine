@@ -4,6 +4,8 @@ export const revalidate = 0;
 import Link from "next/link";
 import DashboardCards from "@/components/DashboardCards";
 import RecentActivity from "@/components/RecentActivity";
+import DashboardFollowUps from "@/components/DashboardFollowUps";
+import DashboardAiSalesAssistant from "@/components/DashboardAiSalesAssistant";
 
 export default function HomePage() {
   return (
@@ -13,7 +15,9 @@ export default function HomePage() {
       <DashboardCards />
 
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-8">
-        <div className="xl:col-span-2">
+        <div className="xl:col-span-2 space-y-8">
+          <DashboardFollowUps />
+          <DashboardAiSalesAssistant />
           <RecentActivity />
         </div>
 
@@ -29,6 +33,13 @@ export default function HomePage() {
             </Link>
 
             <Link
+              href="/sent-emails"
+              className="px-5 py-4 border rounded-xl text-lg font-medium text-black hover:bg-gray-50 transition"
+            >
+              View Sent Emails
+            </Link>
+
+            <Link
               href="/orders"
               className="px-5 py-4 border rounded-xl text-lg font-medium text-black hover:bg-gray-50 transition"
             >
@@ -40,6 +51,13 @@ export default function HomePage() {
               className="px-5 py-4 border rounded-xl text-lg font-medium text-black hover:bg-gray-50 transition"
             >
               View Enquiries
+            </Link>
+
+            <Link
+              href="/sales-followups"
+              className="px-5 py-4 border rounded-xl text-lg font-medium text-black hover:bg-gray-50 transition"
+            >
+              View Sales Follow Ups
             </Link>
           </div>
         </div>

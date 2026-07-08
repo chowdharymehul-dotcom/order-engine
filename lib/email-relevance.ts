@@ -5,11 +5,27 @@ export type RelevanceResult = {
 };
 
 function clean(value: string | null | undefined) {
-  return String(value || "").toLowerCase().replace(/\s+/g, " ").trim();
+  return String(value || "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function hasAny(text: string, patterns: string[]) {
   return patterns.filter((pattern) => text.includes(pattern));
+}
+
+function hasInlineOrderPattern(text: string) {
+  return (
+    /\bpo\s*#?\s*:?\s*[a-z0-9\-\/]+/i.test(text) ||
+    /\bp\.?o\.?\s*#?\s*:?\s*[a-z0-9\-\/]+/i.test(text) ||
+    /\b[a-z]{1,4}\d{3,}[a-z0-9\-\/]*\s*[-–]\s*\d+\s*(pc|pcs|piece|pieces|qty|yards|yds)?/i.test(
+      text
+    ) ||
+    /\b[a-z0-9\-\/]{3,}\s*[-–]\s*\d+\s*(pc|pcs|piece|pieces|qty|yards|yds)?\s*@\s*\$?\d+/i.test(
+      text
+    )
+  );
 }
 
 export function isRelevantBusinessEmail(params: {
@@ -79,7 +95,7 @@ export function isRelevantBusinessEmail(params: {
     "noreply",
     "no-reply",
     "donotreply",
-    "do-not-reply"
+    "do-not-reply",
   ];
 
   const hardRejectMatches = hasAny(
@@ -97,6 +113,14 @@ export function isRelevantBusinessEmail(params: {
     };
   }
 
+  if (hasInlineOrderPattern(fullContent)) {
+    return {
+      relevant: true,
+      reason: "Inline order pattern matched: PO/SKU/quantity/price",
+      confidence: "high",
+    };
+  }
+
   const strongBusinessSignals = [
     "purchase order",
     "po #",
@@ -104,6 +128,9 @@ export function isRelevantBusinessEmail(params: {
     "p.o.",
     "new order",
     "place order",
+    "below order",
+    "confirm order",
+    "please confirm",
     "cancel order",
     "cancel po",
     "cancel shipment",
@@ -117,6 +144,7 @@ export function isRelevantBusinessEmail(params: {
     "quantity",
     "qty",
     "pcs",
+    "pc",
     "yards",
     "yds",
     "trim",
@@ -139,10 +167,9 @@ export function isRelevantBusinessEmail(params: {
     "proforma invoice",
     "invoice",
     "pedido proveedor",
-    "payment order",
     "shipping bill",
     "sb status",
-    "closure status"
+    "closure status",
   ];
 
   const matchedSignals = hasAny(fullContent, strongBusinessSignals);
@@ -168,7 +195,7 @@ export function isRelevantBusinessEmail(params: {
     "swatch",
     "pedido",
     "shipping",
-    "sb"
+    "sb",
   ];
 
   const fileLooksBusinessRelevant = businessAttachmentSignals.some((signal) =>

@@ -3,6 +3,37 @@ export const dynamic = "force-dynamic";
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
+function clean(value: any) {
+  return String(value || "").trim();
+}
+
+function decodeJwtPayload(token: string | null | undefined) {
+  try {
+    const value = clean(token);
+    const payload = value.split(".")[1];
+
+    if (!payload) return null;
+
+    const normalized = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const json = Buffer.from(normalized, "base64").toString("utf8");
+
+    return JSON.parse(json);
+  } catch {
+    return null;
+  }
+}
+
+function getEmailFromTokenData(tokenData: any) {
+  const decoded = decodeJwtPayload(tokenData?.id_token);
+
+  return (
+    clean(decoded?.email).toLowerCase() ||
+    clean(decoded?.upn).toLowerCase() ||
+    clean(decoded?.unique_name).toLowerCase() ||
+    ""
+  );
+}
+
 export async function GET(req: NextRequest) {
   try {
     const code = req.nextUrl.searchParams.get("code");
@@ -59,9 +90,11 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    const accessToken = tokenData.access_token;
-    const refreshToken = tokenData.refresh_token;
-    const expiresIn = tokenData.expires_in;
+    const accessToken = clean(tokenData.access_token);
+    const refreshToken = clean(tokenData.refresh_token);
+    const expiresIn = Number(tokenData.expires_in || 3600);
+    const scope = clean(tokenData.scope);
+    const accountEmail = getEmailFromTokenData(tokenData);
 
     if (!accessToken) {
       return NextResponse.json(
@@ -81,28 +114,48 @@ export async function GET(req: NextRequest) {
           ok: false,
           step: "missing_refresh_token",
           error:
-            "Google did not return a refresh token. Visit /api/auth/gmail/login again after ensuring prompt=consent and access_type=offline are set.",
+            "Google did not return a refresh token. Please disconnect the app from Google Account permissions and reconnect Gmail.",
           tokenData,
         },
         { status: 400 }
       );
     }
 
-    const expiresAt = new Date(
-      Date.now() + Number(expiresIn || 3600) * 1000
-    ).toISOString();
+    if (!scope.includes("https://www.googleapis.com/auth/gmail.send")) {
+      return NextResponse.json(
+        {
+          ok: false,
+          step: "missing_gmail_send_scope",
+          error: "Gmail send permission was not granted.",
+          scope,
+        },
+        { status: 400 }
+      );
+    }
+
+    const expiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
 
     const supabase = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
       process.env.SUPABASE_SERVICE_ROLE_KEY!
     );
 
+    await supabase
+      .from("inbox_connections")
+      .update({
+        connection_status: "inactive",
+        last_error: "Replaced by newer Gmail connection",
+      })
+      .eq("provider", "gmail");
+
     const { error: insertError } = await supabase
       .from("inbox_connections")
       .insert({
         provider: "gmail",
+        account_email: accountEmail || null,
         access_token: accessToken,
         refresh_token: refreshToken,
+        scope,
         expires_at: expiresAt,
         connection_status: "active",
         last_error: null,
@@ -124,7 +177,7 @@ export async function GET(req: NextRequest) {
       req.nextUrl.origin ||
       "http://localhost:3000";
 
-    return NextResponse.redirect(appBaseUrl);
+    return NextResponse.redirect(`${appBaseUrl}/customers`);
   } catch (err: any) {
     return NextResponse.json(
       {

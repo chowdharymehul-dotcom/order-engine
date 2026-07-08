@@ -25,6 +25,9 @@ type Mapping = {
   width_percent?: number | null;
   height_percent?: number | null;
   font_size?: number | null;
+  font_color?: string | null;
+  preview_text?: string | null;
+  content?: string | null;
   background_fill?: string | null;
   background_width?: number | null;
   background_height?: number | null;
@@ -36,6 +39,7 @@ type TemplateColumn = {
   source_field: string | null;
   column_order: number | null;
   mapped_to?: string | null;
+  preview_text?: string | null;
   x_position?: number | null;
   y_position?: number | null;
   width?: number | null;
@@ -45,6 +49,7 @@ type TemplateColumn = {
   width_percent?: number | null;
   height_percent?: number | null;
   font_size?: number | null;
+  font_color?: string | null;
   row_height?: number | null;
 };
 
@@ -121,6 +126,9 @@ type AIAnalysis = {
   totals?: any[];
   logos?: any[];
   static_blocks?: any[];
+  lines?: any[];
+  rectangles?: any[];
+  table_borders?: any[];
 };
 
 type GenerateTemplatePdfParams = {
@@ -219,6 +227,10 @@ function mappedValue(row: any) {
       row?.block_key ||
       ""
   );
+}
+
+function overrideText(row: any) {
+  return clean(row?.preview_text);
 }
 
 function normalizeMappedPath(path: string) {
@@ -384,11 +396,12 @@ function mappingFromAnalysisItem(params: {
   type: "field" | "total";
 }) {
   const { item, index, pageWidth, pageHeight, type } = params;
-  const fieldName = mappedValue(item);
+  const mapped = mappedValue(item);
+  const preview = overrideText(item);
 
   return {
     id: `ai-${type}-${index}`,
-    field_name: fieldName,
+    field_name: mapped || `manual.override_${type}_${index}`,
     display_label: clean(item.display_label),
     field_type: type === "total" ? "system" : clean(item.field_type || "system"),
     page_number: Number(item.page_number || 1),
@@ -417,6 +430,8 @@ function mappingFromAnalysisItem(params: {
       fallback: 18,
     }),
     font_size: numberOrFallback(item.font_size, 8),
+    font_color: clean(item.font_color || ""),
+    preview_text: preview,
     background_fill: null,
     background_width: fromPercentOrValue({
       percent: item.width_percent,
@@ -439,7 +454,7 @@ function analysisFieldsToMappings(
   pageHeight: number
 ) {
   return asArray(analysis?.fields)
-    .filter((field: any) => mappedValue(field))
+    .filter((field: any) => mappedValue(field) || overrideText(field))
     .map((field: any, index: number) =>
       mappingFromAnalysisItem({
         item: field,
@@ -457,7 +472,7 @@ function analysisTotalsToMappings(
   pageHeight: number
 ) {
   return asArray(analysis?.totals)
-    .filter((total: any) => mappedValue(total))
+    .filter((total: any) => mappedValue(total) || overrideText(total))
     .map((total: any, index: number) =>
       mappingFromAnalysisItem({
         item: total,
@@ -475,16 +490,18 @@ function analysisColumnsToColumns(
   pageHeight: number
 ) {
   return asArray(analysis?.columns)
-    .filter((column: any) => mappedValue(column))
+    .filter((column: any) => mappedValue(column) || overrideText(column))
     .map((column: any, index: number) => {
       const mapped = mappedValue(column);
+      const preview = overrideText(column);
 
       return {
         id: `ai-column-${index}`,
         display_label: clean(column.display_label),
-        source_field: mapped,
+        source_field: mapped || `manual.override_column_${index}`,
         column_order: Number(column.column_order || index + 1),
-        mapped_to: mapped,
+        mapped_to: mapped || `manual.override_column_${index}`,
+        preview_text: preview,
         x_position: fromPercentOrValue({
           percent: column.x_percent,
           value: column.x_position,
@@ -511,8 +528,262 @@ function analysisColumnsToColumns(
         }),
         row_height: numberOrFallback(column.row_height, column.height || 20),
         font_size: numberOrFallback(column.font_size, 8),
+        font_color: clean(column.font_color || ""),
       };
     }) as TemplateColumn[];
+}
+
+function drawStaticBlocks(params: {
+  pages: ReturnType<PDFDocument["getPages"]>;
+  analysis: AIAnalysis | null | undefined;
+  font: any;
+  defaultFontSize: number;
+  defaultColor: any;
+}) {
+  const { pages, analysis, font, defaultFontSize, defaultColor } = params;
+
+  const blocks = asArray(analysis?.static_blocks);
+
+  for (const block of blocks) {
+    const content =
+      clean(block.content) ||
+      clean(block.preview_text) ||
+      clean(block.display_label) ||
+      clean(block.block_key);
+
+    if (!content) continue;
+
+    const pageIndex = Math.max(Number(block.page_number || 1) - 1, 0);
+    const page = pages[pageIndex] || pages[0];
+
+    if (!page) continue;
+
+    const pageSize = page.getSize();
+
+    const x = fromPercentOrValue({
+      percent: block.x_percent,
+      value: block.x_position,
+      pageSize: pageSize.width,
+      fallback: 0,
+    });
+
+    const y = fromPercentOrValue({
+      percent: block.y_percent,
+      value: block.y_position,
+      pageSize: pageSize.height,
+      fallback: 0,
+    });
+
+    const width = fromPercentOrValue({
+      percent: block.width_percent,
+      value: block.width,
+      pageSize: pageSize.width,
+      fallback: 180,
+    });
+
+    const height = fromPercentOrValue({
+      percent: block.height_percent,
+      value: block.height,
+      pageSize: pageSize.height,
+      fallback: 18,
+    });
+
+    const size = numberOrFallback(block.font_size, defaultFontSize);
+    const color = block.font_color ? hexToRgb(block.font_color) : defaultColor;
+
+    const shouldCover =
+      block.cover_background === true ||
+      block.cover_background === "true" ||
+      block.cover_background === "1" ||
+      block.background_fill ||
+      block.fill_color;
+
+    if (shouldCover) {
+      page.drawRectangle({
+        x,
+        y: y - 3,
+        width,
+        height: Math.max(height, size + 6),
+        color: hexToRgb(
+          clean(block.background_fill || block.fill_color || "#ffffff")
+        ),
+      });
+    }
+
+    page.drawText(content, {
+      x,
+      y,
+      size,
+      font,
+      color,
+      maxWidth: width,
+      lineHeight: size + 2,
+    });
+  }
+}
+
+function drawRectangles(params: {
+  pages: ReturnType<PDFDocument["getPages"]>;
+  analysis: AIAnalysis | null | undefined;
+}) {
+  const { pages, analysis } = params;
+
+  for (const rectangle of asArray(analysis?.rectangles)) {
+    const pageIndex = Math.max(Number(rectangle.page_number || 1) - 1, 0);
+    const page = pages[pageIndex] || pages[0];
+    if (!page) continue;
+
+    const pageSize = page.getSize();
+
+    const x = fromPercentOrValue({
+      percent: rectangle.x_percent,
+      value: rectangle.x_position,
+      pageSize: pageSize.width,
+      fallback: 0,
+    });
+
+    const y = fromPercentOrValue({
+      percent: rectangle.y_percent,
+      value: rectangle.y_position,
+      pageSize: pageSize.height,
+      fallback: 0,
+    });
+
+    const width = fromPercentOrValue({
+      percent: rectangle.width_percent,
+      value: rectangle.width,
+      pageSize: pageSize.width,
+      fallback: 100,
+    });
+
+    const height = fromPercentOrValue({
+      percent: rectangle.height_percent,
+      value: rectangle.height,
+      pageSize: pageSize.height,
+      fallback: 50,
+    });
+
+    const borderWidth = numberOrFallback(rectangle.border_thickness, 1);
+    const borderColor = hexToRgb(rectangle.border_color || "#111827");
+
+    const fill = clean(rectangle.fill_color);
+
+    page.drawRectangle({
+      x,
+      y,
+      width,
+      height,
+      borderWidth,
+      borderColor,
+      color:
+        fill && fill !== "transparent" ? hexToRgb(fill) : undefined,
+    });
+  }
+}
+
+function drawTableBorders(params: {
+  pages: ReturnType<PDFDocument["getPages"]>;
+  analysis: AIAnalysis | null | undefined;
+}) {
+  const { pages, analysis } = params;
+
+  for (const table of asArray(analysis?.table_borders)) {
+    const pageIndex = Math.max(Number(table.page_number || 1) - 1, 0);
+    const page = pages[pageIndex] || pages[0];
+    if (!page) continue;
+
+    const pageSize = page.getSize();
+
+    const x = fromPercentOrValue({
+      percent: table.x_percent,
+      value: table.x_position,
+      pageSize: pageSize.width,
+      fallback: 0,
+    });
+
+    const y = fromPercentOrValue({
+      percent: table.y_percent,
+      value: table.y_position,
+      pageSize: pageSize.height,
+      fallback: 0,
+    });
+
+    const width = fromPercentOrValue({
+      percent: table.width_percent,
+      value: table.width,
+      pageSize: pageSize.width,
+      fallback: 100,
+    });
+
+    const height = fromPercentOrValue({
+      percent: table.height_percent,
+      value: table.height,
+      pageSize: pageSize.height,
+      fallback: 50,
+    });
+
+    const borderWidth = numberOrFallback(table.border_thickness, 1);
+    const borderColor = hexToRgb(table.border_color || "#111827");
+
+    page.drawRectangle({
+      x,
+      y,
+      width,
+      height,
+      borderWidth,
+      borderColor,
+    });
+  }
+}
+
+function drawLines(params: {
+  pages: ReturnType<PDFDocument["getPages"]>;
+  analysis: AIAnalysis | null | undefined;
+}) {
+  const { pages, analysis } = params;
+
+  for (const line of asArray(analysis?.lines)) {
+    const pageIndex = Math.max(Number(line.page_number || 1) - 1, 0);
+    const page = pages[pageIndex] || pages[0];
+    if (!page) continue;
+
+    const pageSize = page.getSize();
+
+    const x1 = fromPercentOrValue({
+      percent: line.x1_percent,
+      value: line.x1,
+      pageSize: pageSize.width,
+      fallback: 0,
+    });
+
+    const y1 = fromPercentOrValue({
+      percent: line.y1_percent,
+      value: line.y1,
+      pageSize: pageSize.height,
+      fallback: 0,
+    });
+
+    const x2 = fromPercentOrValue({
+      percent: line.x2_percent,
+      value: line.x2,
+      pageSize: pageSize.width,
+      fallback: 100,
+    });
+
+    const y2 = fromPercentOrValue({
+      percent: line.y2_percent,
+      value: line.y2,
+      pageSize: pageSize.height,
+      fallback: 0,
+    });
+
+    page.drawLine({
+      start: { x: x1, y: y1 },
+      end: { x: x2, y: y2 },
+      thickness: numberOrFallback(line.thickness, 1),
+      color: hexToRgb(line.color || "#111827"),
+    });
+  }
 }
 
 export async function generateTemplateOCPdfBuffer(
@@ -553,6 +824,29 @@ export async function generateTemplateOCPdfBuffer(
   const defaultFontSize = Number(template.default_font_size || 8);
   const defaultColor = hexToRgb(template.default_text_color);
 
+  drawRectangles({
+    pages,
+    analysis,
+  });
+
+  drawTableBorders({
+    pages,
+    analysis,
+  });
+
+  drawLines({
+    pages,
+    analysis,
+  });
+
+  drawStaticBlocks({
+    pages,
+    analysis,
+    font,
+    defaultFontSize,
+    defaultColor,
+  });
+
   for (const mapping of mappings) {
     const fieldName = clean(mapping.field_name);
 
@@ -560,6 +854,8 @@ export async function generateTemplateOCPdfBuffer(
 
     const pageIndex = Math.max(Number(mapping.page_number || 1) - 1, 0);
     const page = pages[pageIndex] || pages[0];
+
+    if (!page) continue;
 
     const pageSize = page.getSize();
 
@@ -585,13 +881,18 @@ export async function generateTemplateOCPdfBuffer(
     });
 
     const size = Number(mapping.font_size || defaultFontSize);
+    const color = mapping.font_color
+      ? hexToRgb(mapping.font_color)
+      : defaultColor;
 
-    const text = getPathValue({
-      path: fieldName,
-      seller,
-      customer,
-      oc,
-    });
+    const text =
+      clean(mapping.preview_text) ||
+      getPathValue({
+        path: fieldName,
+        seller,
+        customer,
+        oc,
+      });
 
     if (!text) continue;
 
@@ -600,7 +901,7 @@ export async function generateTemplateOCPdfBuffer(
       y,
       size,
       font,
-      color: defaultColor,
+      color,
       maxWidth: width,
       lineHeight: size + 2,
     });
@@ -613,6 +914,8 @@ export async function generateTemplateOCPdfBuffer(
 
     sortedColumns.forEach((column) => {
       const page = pages[0];
+      if (!page) return;
+
       const pageSize = page.getSize();
 
       const x = fromPercentOrValue({
@@ -638,9 +941,14 @@ export async function generateTemplateOCPdfBuffer(
 
       const fontSize = Number(column.font_size || 8);
       const rowHeight = Number(column.row_height || column.height || 20);
+      const color = column.font_color
+        ? hexToRgb(column.font_color)
+        : defaultColor;
 
       lineItems.forEach((line, rowIndex) => {
-        const text = getLineValue(line, column.mapped_to || column.source_field);
+        const text =
+          clean(column.preview_text) ||
+          getLineValue(line, column.mapped_to || column.source_field);
 
         if (!text) return;
 
@@ -649,7 +957,7 @@ export async function generateTemplateOCPdfBuffer(
           y: startY - rowIndex * rowHeight,
           size: fontSize,
           font,
-          color: defaultColor,
+          color,
           maxWidth: width,
         });
       });

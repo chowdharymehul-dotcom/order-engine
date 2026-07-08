@@ -14,6 +14,8 @@ type OrderItem = {
   unit_price: number | null;
   total_amount: number | null;
   currency: string | null;
+  custom_fields: Record<string, any> | null;
+  delivery_date: string | null;
 };
 
 function parseIds(value: string) {
@@ -76,7 +78,7 @@ export async function POST(req: NextRequest) {
     const { data: orderRows, error: orderError } = await supabase
       .from("order_items")
       .select(
-        "id, customer, customer_id, po_number, sku, quantity, notes, unit_price, total_amount, currency"
+        "id, customer, customer_id, po_number, sku, quantity, notes, unit_price, total_amount, currency, custom_fields, delivery_date"
       )
       .in("id", ids);
 
@@ -103,7 +105,9 @@ export async function POST(req: NextRequest) {
     const { data: existingOC, error: existingError } = await supabase
       .from("order_confirmations")
       .select("id")
-      .or(`order_item_id.eq.${primaryOrderItemId},order_item_ids.cs.{${primaryOrderItemId}}`)
+      .or(
+        `order_item_id.eq.${primaryOrderItemId},order_item_ids.cs.{${primaryOrderItemId}}`
+      )
       .maybeSingle();
 
     if (existingError) {
@@ -114,6 +118,14 @@ export async function POST(req: NextRequest) {
     }
 
     if (existingOC?.id) {
+      await supabase
+        .from("order_items")
+        .update({
+          oc_document_id: existingOC.id,
+          oc_status: "Draft",
+        })
+        .in("id", ids);
+
       return NextResponse.redirect(
         new URL(`/orders/${primaryOrderItemId}/oc`, req.url),
         { status: 303 }
@@ -155,6 +167,11 @@ export async function POST(req: NextRequest) {
       .filter(Boolean)
       .join(" | ");
 
+    const deliveryDate =
+      first.delivery_date ||
+      orderItems.find((item) => item.delivery_date)?.delivery_date ||
+      null;
+
     const { data: ocData, error: insertError } = await supabase
       .from("order_confirmations")
       .insert({
@@ -165,11 +182,11 @@ export async function POST(req: NextRequest) {
         oc_number: ocNumber,
         oc_date: today,
         po_number: first.po_number || "",
-        delivery_date: null,
+        delivery_date: deliveryDate,
         payment_terms: "",
         shipment_terms: "",
         internal_notes: notes,
-        customer_notes: "",
+        customer_notes: notes,
         pdf_url: null,
         status: "Draft",
         updated_at: new Date().toISOString(),
@@ -203,9 +220,14 @@ export async function POST(req: NextRequest) {
         currency: item.currency || "USD",
         line_total: lineTotal,
         notes: item.notes || "",
-        custom_fields: {},
+        custom_fields: item.custom_fields || {},
       };
     });
+
+    await supabase
+      .from("order_confirmation_line_items")
+      .delete()
+      .eq("order_confirmation_id", ocId);
 
     const { error: lineItemsError } = await supabase
       .from("order_confirmation_line_items")
@@ -222,14 +244,13 @@ export async function POST(req: NextRequest) {
       .from("order_items")
       .update({
         oc_status: "Draft",
+        oc_document_id: ocId,
       })
       .in("id", ids);
 
     return NextResponse.redirect(
       new URL(`/orders/${primaryOrderItemId}/oc`, req.url),
-      {
-        status: 303,
-      }
+      { status: 303 }
     );
   } catch (error: any) {
     return NextResponse.json(

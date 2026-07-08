@@ -90,6 +90,26 @@ export async function GET(req: NextRequest) {
     }
 
     const expiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
+let accountEmail = "";
+
+const profileRes = await fetch("https://graph.microsoft.com/v1.0/me", {
+  headers: {
+    Authorization: `Bearer ${accessToken}`,
+  },
+  cache: "no-store",
+});
+
+if (profileRes.ok) {
+  const profileData = await profileRes.json();
+
+  accountEmail = String(
+    profileData.mail || profileData.userPrincipalName || ""
+  )
+    .trim()
+    .toLowerCase();
+}
+
+
 
     const supabaseAdmin = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -98,14 +118,16 @@ export async function GET(req: NextRequest) {
 
     const { error: insertError } = await supabaseAdmin
       .from("inbox_connections")
-      .insert({
-        provider: "outlook",
-        access_token: accessToken,
-        refresh_token: refreshToken || "",
-        expires_at: expiresAt,
-        connection_status: "active",
-        last_error: null,
-      });
+  .insert({
+  provider: "outlook",
+  account_email: accountEmail || null,
+  access_token: accessToken,
+  refresh_token: refreshToken || "",
+  scope,
+  expires_at: expiresAt,
+  connection_status: "active",
+  last_error: null,
+});
 
     if (insertError) {
       return NextResponse.json(

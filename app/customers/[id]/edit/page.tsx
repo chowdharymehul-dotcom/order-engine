@@ -72,11 +72,39 @@ export default async function EditCustomerPage({
   return (
     <div className="p-10 space-y-8">
       <div className="flex items-center justify-between">
-        <h1 className="text-3xl font-bold">Edit Customer</h1>
+        <div>
+          <h1 className="text-3xl font-bold">Edit Customer</h1>
+          <p className="text-sm text-gray-500 mt-1">
+            Update customer profile and communication details.
+          </p>
+        </div>
 
-        <Link href="/customers" className="px-4 py-2 border rounded-lg">
-          Back to Customers
-        </Link>
+        <div className="flex gap-3">
+          <Link
+            href={`/customers/${customer.id}/dashboard`}
+            className="px-4 py-2 rounded-lg bg-purple-50 text-purple-700 border border-purple-200 hover:bg-purple-100"
+          >
+            Dashboard
+          </Link>
+
+          <Link
+            href={`/customers/${customer.id}/timeline`}
+            className="px-4 py-2 rounded-lg bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100"
+          >
+            Timeline
+          </Link>
+
+          <Link
+            href={`/customers/${customer.id}/email`}
+            className="px-4 py-2 rounded-lg bg-gray-100 border hover:bg-gray-200"
+          >
+            Send Email
+          </Link>
+
+          <Link href="/customers" className="px-4 py-2 border rounded-lg">
+            Back to Customers
+          </Link>
+        </div>
       </div>
 
       <form action="/api/customers/save" method="POST" className="space-y-8">

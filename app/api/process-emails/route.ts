@@ -4,7 +4,11 @@ export const revalidate = 0;
 import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
-import { findCustomerForEmail } from "@/lib/customerAutoLink";
+import { getOrCreateCustomer } from "@/lib/customerAutoLink";
+import { resolveOrderGroup } from "@/lib/order-group";
+import { validateOrderCandidate } from "@/lib/order-validator";
+import { validateEnquiryCandidate } from "@/lib/enquiry-validator";
+import { validateCancellationCandidate } from "@/lib/cancellation-validator";
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY!,
@@ -17,26 +21,43 @@ const supabase = createClient(
 
 type EmailRow = {
   id: string;
-  provider: string | null;
   subject: string | null;
   from_email: string | null;
   body_text: string | null;
   attachment_text: string | null;
   attachment_url: string | null;
-  attachment_name: string | null;
-  attachment_mime_type: string | null;
-  attachment_type: string | null;
   processing_status: string | null;
+  direction: string | null;
   received_at: string | null;
   external_message_id: string | null;
   gmail_message_id: string | null;
+  external_thread_id: string | null;
+};
+
+type ParsedLine = {
+  sku: string;
+  quantity: number | null;
+  unit_price: number | null;
+  total_amount: number | null;
+  currency: string;
+  notes: string;
+  custom_fields: Record<string, string>;
 };
 
 type ExtractedItem = {
   sku?: string;
-  qty?: number;
-  quantity?: number;
-  notes?: string;
+  article?: string;
+  style?: string;
+  item_code?: string;
+  product_code?: string;
+  quantity?: number | string | null;
+  qty?: number | string | null;
+  unit_price?: number | string | null;
+  price?: number | string | null;
+  line_total?: number | string | null;
+  total_amount?: number | string | null;
+  currency?: string | null;
+  notes?: string | null;
 };
 
 type ExtractedData = {
@@ -44,247 +65,423 @@ type ExtractedData = {
   po_number?: string;
   items?: ExtractedItem[];
   notes?: string;
-  priority?: string;
   follow_up_date?: string;
 };
 
-function cleanText(value: string | null | undefined) {
+function clean(value: any) {
   return String(value || "")
-    .replace(/\s+/g, " ")
     .replace(/\u0000/g, "")
+    .replace(/\s+/g, " ")
     .trim();
+}
+
+function keepLines(value: any) {
+  return String(value || "")
+    .replace(/\u0000/g, "")
+    .replace(/\r/g, "\n")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function num(value: any) {
+  const text = String(value ?? "").replace(/[$,]/g, "").trim();
+  if (!text) return null;
+  const number = Number(text);
+  return Number.isFinite(number) ? number : null;
+}
+
+function currency(value: any) {
+  const text = clean(value).toUpperCase();
+  if (!text || text === "$" || text === "US$") return "USD";
+  if (text === "€") return "EUR";
+  if (text === "£") return "GBP";
+  if (text === "₹") return "INR";
+  return text;
 }
 
 function shouldSkipEmail(email: EmailRow, force: boolean) {
   if (force) return false;
-
-  const status = email.processing_status || "";
-
-  return status === "processed" || status === "ignored";
-}
-
-function hasUsefulAttachmentText(email: EmailRow) {
-  return !!cleanText(email.attachment_text);
+  return (
+    email.processing_status === "processed" ||
+    email.processing_status === "ignored"
+  );
 }
 
 function hasAttachmentWithoutText(email: EmailRow) {
-  return !!email.attachment_url && !hasUsefulAttachmentText(email);
+  return !!email.attachment_url && !clean(email.attachment_text);
 }
 
-function getExternalMessageId(email: EmailRow) {
+function externalId(email: EmailRow) {
   return email.external_message_id || email.gmail_message_id || email.id;
 }
 
-function getGmailMessageId(email: EmailRow) {
-  return email.gmail_message_id || null;
-}
-
-function normalizeQuantity(item: ExtractedItem) {
-  const raw = item.qty ?? item.quantity ?? 0;
-  const num = Number(raw);
-
-  if (Number.isNaN(num)) return 0;
-
-  return num;
-}
-
-function normalizeItems(items: ExtractedItem[] | undefined) {
-  if (!Array.isArray(items)) return [];
-
-  return items.map((item) => ({
-    sku: cleanText(item.sku || ""),
-    quantity: normalizeQuantity(item),
-    notes: cleanText(item.notes || ""),
-  }));
-}
-
-function fallbackSkuFromSubject(subject: string | null) {
-  const text = cleanText(subject || "");
-
-  if (!text) return "ORDER ITEM";
-
-  return text;
-}
-
-function extractPoFallback(content: string) {
-  const poMatch =
-    content.match(/PO\s*#?\s*:?\s*([A-Z0-9\-]+)/i) ||
-    content.match(/P\.?O\.?\s*#?\s*:?\s*([A-Z0-9\-]+)/i) ||
-    content.match(/purchase order\s*#?\s*:?\s*([A-Z0-9\-]+)/i);
-
-  return poMatch?.[1] || "";
-}
-
-function hasExplicitCancellationIntent(content: string) {
-  const text = cleanText(content).toLowerCase();
-
-  const explicitCancelPatterns = [
-    /\bplease\s+cancel\b/i,
-    /\bcancel\s+(this\s+)?order\b/i,
-    /\bcancel\s+(this\s+)?po\b/i,
-    /\bcancel\s+(the\s+)?purchase\s+order\b/i,
-    /\bcancel\s+(this\s+)?shipment\b/i,
-    /\bstop\s+(this\s+)?order\b/i,
-    /\bstop\s+production\b/i,
-    /\bdo\s+not\s+proceed\b/i,
-    /\bdon't\s+proceed\b/i,
-    /\bdo\s+not\s+ship\b/i,
-    /\bdon't\s+ship\b/i,
-    /\bhold\s+this\s+order\b/i,
-    /\bremove\s+this\s+item\b/i,
-    /\bremove\s+these\s+items\b/i,
-    /\border\s+cancelled\b/i,
-    /\border\s+canceled\b/i,
-    /\bpo\s+cancelled\b/i,
-    /\bpo\s+canceled\b/i,
-  ];
-
-  return explicitCancelPatterns.some((pattern) => pattern.test(text));
-}
-
-function hasOnlyCancelDateLanguage(content: string) {
-  const text = cleanText(content).toLowerCase();
-
-  const cancelDatePatterns = [
-    /\bcancel\s+date\b/i,
-    /\bcancel\s+by\b/i,
-    /\bcancel\s+after\b/i,
-    /\bcancellation\s+date\b/i,
-    /\border\s+cancel\s+date\b/i,
-    /\bship\s+cancel\s+date\b/i,
-    /\bstart\s+cancel\b/i,
-    /\bstart\s+date\b/i,
-    /\bcancel\s+\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}\b/i,
-  ];
-
-  const hasCancelDate = cancelDatePatterns.some((pattern) =>
-    pattern.test(text)
+function poFromText(text: string) {
+  return (
+    clean(text).match(/\bPO\s*#\s*:?\s*([A-Z0-9\-\/]+)/i)?.[1] ||
+    clean(text).match(/\bP\.?O\.?\s*#?\s*:?\s*([A-Z0-9\-\/]+)/i)?.[1] ||
+    clean(text).match(/\bPurchase\s+Order\s*#?\s*:?\s*([A-Z0-9\-\/]+)/i)?.[1] ||
+    ""
   );
-
-  return hasCancelDate && !hasExplicitCancellationIntent(text);
 }
 
-function hasOrderSignals(content: string) {
-  const text = cleanText(content).toLowerCase();
+function customerFromPO(text: string) {
+  const lines = keepLines(text)
+    .split("\n")
+    .map((line) => clean(line))
+    .filter(Boolean);
 
-  const orderSignals = [
-    "purchase order",
-    "po #",
-    "po:",
-    "p.o.",
-    "vendor",
-    "ship to",
-    "bill to",
-    "style",
-    "sku",
-    "article",
-    "quantity",
-    "qty",
-    "pcs",
-    "yards",
-    "yds",
-    "unit price",
-    "amount",
-    "terms",
-    "fob",
-    "ship via",
-    "order lines",
-  ];
+  const poIndex = lines.findIndex((line) => /^purchase order$/i.test(line));
 
-  return orderSignals.some((signal) => text.includes(signal));
-}
+  if (poIndex >= 0) {
+    for (let i = poIndex + 1; i < Math.min(lines.length, poIndex + 8); i += 1) {
+      const line = lines[i];
 
-async function classifyEmail(content: string) {
-  if (hasOnlyCancelDateLanguage(content) && hasOrderSignals(content)) {
-    return "ORDER";
+      if (
+        line &&
+        !/^date\b/i.test(line) &&
+        !/^po\b/i.test(line) &&
+        !/^\d/.test(line) &&
+        !line.includes("@") &&
+        !line.toLowerCase().startsWith("http")
+      ) {
+        return line;
+      }
+    }
   }
 
+  return "";
+}
+
+function labelValue(block: string, labels: string[]) {
+  for (const label of labels) {
+    const match = block.match(new RegExp(`${label}\\s*:\\s*([^\\n]+)`, "i"));
+    if (match?.[1]) return clean(match[1]);
+  }
+
+  return "";
+}
+
+function moneyValues(block: string) {
+  return Array.from(
+    block.matchAll(/(?:US\$|\$|USD\s*)\s*(\d+(?:\.\d{1,2})?)/gi)
+  )
+    .map((match) => Number(match[1]))
+    .filter((value) => Number.isFinite(value) && value > 0);
+}
+
+function numberLines(block: string) {
+  return block
+    .split("\n")
+    .map((line) => clean(line))
+    .filter((line) => /^\d+(?:\.\d+)?$/.test(line))
+    .map((line) => Number(line))
+    .filter((value) => Number.isFinite(value));
+}
+
+function itemBlocks(text: string) {
+  const preserved = keepLines(text);
+  const regex =
+    /\b(?:ARTICLE|SKU|STYLE|ITEM\s*#?|ITEM\s*NO|PRODUCT\s*CODE|PART\s*NO|MODEL|MATERIAL\s*CODE)\s*:\s*([A-Z0-9][A-Z0-9\-\/._]*)/gi;
+
+  const matches = Array.from(preserved.matchAll(regex));
+
+  return matches.map((match, index) => {
+    const start = match.index || 0;
+    const end =
+      index + 1 < matches.length
+        ? matches[index + 1].index || preserved.length
+        : preserved.length;
+
+    return {
+      sku: clean(match[1]),
+      block: preserved.slice(start, end),
+    };
+  });
+}
+
+function parseStructuredPO(text: string): ParsedLine[] {
+  return itemBlocks(text)
+    .map(({ sku, block }) => {
+      const description = labelValue(block, ["DESCRIPTION", "PRODUCT"]);
+      const color = labelValue(block, ["COLOR", "COLOUR"]);
+      const size = labelValue(block, ["SIZE"]);
+      const notesChanges = labelValue(block, [
+        "NOTES/CHANGES",
+        "NOTES",
+        "CHANGES",
+        "REMARKS",
+        "SPECIFICATION",
+      ]);
+
+      const prices = moneyValues(block);
+      const qtyNumbers = numberLines(block);
+      const quantity =
+        qtyNumbers.find((value) => value > 0 && Number.isInteger(value)) ??
+        null;
+      const unitPrice = prices[0] ?? null;
+      const totalAmount =
+        prices[1] ??
+        (quantity !== null && unitPrice !== null ? quantity * unitPrice : null);
+
+      const custom_fields: Record<string, string> = {};
+      if (description) custom_fields.description = description;
+      if (color) custom_fields.color = color;
+      if (size) custom_fields.size = size;
+      if (notesChanges) custom_fields.notes_changes = notesChanges;
+      if (totalAmount !== null) custom_fields.line_total = String(totalAmount);
+
+      const notes = [
+        description,
+        color ? `Color: ${color}` : "",
+        size ? `Size: ${size}` : "",
+        notesChanges ? `Notes/Changes: ${notesChanges}` : "",
+      ]
+        .filter(Boolean)
+        .join(" | ");
+
+      return {
+        sku,
+        quantity,
+        unit_price: unitPrice,
+        total_amount: totalAmount,
+        currency: "USD",
+        notes,
+        custom_fields,
+      };
+    })
+    .filter((line) => line.sku);
+}
+
+function hasOrderSignals(text: string) {
+  const value = clean(text).toLowerCase();
+
+  return (
+    value.includes("purchase order") ||
+    value.includes("po #") ||
+    value.includes("article") ||
+    value.includes("unit price") ||
+    value.includes("qty")
+  );
+}
+
+async function markEmail(
+  emailId: string,
+  status: string,
+  _intent?: string,
+  error?: string | null
+) {
+  await supabase
+    .from("emails")
+    .update({
+      processing_status: status,
+      last_processing_error: error || null,
+      processed_at:
+        status === "processed" || status === "ignored"
+          ? new Date().toISOString()
+          : null,
+    })
+    .eq("id", emailId);
+}
+
+async function deleteExistingItems(email: EmailRow) {
+  if (email.external_message_id) {
+    await supabase
+      .from("order_items")
+      .delete()
+      .eq("external_message_id", email.external_message_id);
+  }
+
+  if (email.gmail_message_id) {
+    await supabase
+      .from("order_items")
+      .delete()
+      .eq("gmail_message_id", email.gmail_message_id);
+  }
+
+  await supabase.from("order_items").delete().eq("email_subject", email.subject || "");
+}
+
+
+async function saveOrderItem(params: {
+  email: EmailRow;
+  orderGroupId: string | null;
+  customer: string;
+  customerMatch: any;
+  poNumber: string;
+  action: string;
+  sku: string;
+  quantity: number | null;
+  unitPrice: number | null;
+  totalAmount: number | null;
+  currency: string;
+  notes: string;
+  customFields?: Record<string, any>;
+  followUpDate?: string | null;
+}) {
+  const {
+    email,
+    orderGroupId,
+    customer,
+    customerMatch,
+    poNumber,
+    action,
+    sku,
+    quantity,
+    unitPrice,
+    totalAmount,
+    currency,
+    notes,
+    customFields,
+    followUpDate,
+  } = params;
+
+  let existingQuery = supabase
+    .from("order_items")
+    .select("*")
+    .eq("action", action)
+    .eq("sku", sku)
+    .is("deleted_at", null);
+
+  if (orderGroupId) {
+    existingQuery = existingQuery.eq("order_group_id", orderGroupId);
+  } else {
+    existingQuery = existingQuery
+      .eq("customer", customer)
+      .eq("po_number", poNumber);
+  }
+
+  const { data: existing } = await existingQuery.maybeSingle();
+
+  if (existing) {
+    await supabase
+      .from("order_items")
+      .update({
+        order_group_id: orderGroupId || existing.order_group_id || null,
+customer,
+customer_id: customerMatch.customer_id || existing.customer_id || null,
+customer_match_method:
+  customerMatch.customer_match_method || existing.customer_match_method || null,
+customer_match_confidence:
+  customerMatch.customer_match_confidence ||
+  existing.customer_match_confidence ||
+  null,
+        quantity: quantity ?? existing.quantity,
+        unit_price: unitPrice ?? existing.unit_price,
+        total_amount: totalAmount ?? existing.total_amount,
+        currency: currency || existing.currency,
+        notes: notes || existing.notes,
+        custom_fields:
+          customFields && Object.keys(customFields).length
+            ? customFields
+            : existing.custom_fields,
+        email_subject: email.subject,
+        source_email: email.from_email,
+        parent_email_id: existing.parent_email_id || email.id,
+        external_message_id: externalId(email),
+        gmail_message_id: email.gmail_message_id,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", existing.id);
+
+    return;
+  }
+
+  await supabase.from("order_items").insert({
+    order_group_id: orderGroupId,
+    action,
+    customer,
+    customer_id: customerMatch.customer_id,
+    customer_match_method: customerMatch.customer_match_method,
+    customer_match_confidence: customerMatch.customer_match_confidence,
+    po_number: poNumber,
+    sku,
+    quantity,
+    unit_price: unitPrice,
+    total_amount: totalAmount,
+    currency,
+    notes,
+    custom_fields: customFields || {},
+    status: action === "Place Order" ? "New" : "Pending",
+    source_email: email.from_email || "",
+    parent_email_id: email.id,
+    external_message_id: externalId(email),
+    gmail_message_id: email.gmail_message_id,
+    email_subject: email.subject || "",
+    follow_up_due_at: followUpDate || null,
+    created_at: new Date().toISOString(),
+  });
+}
+
+async function insertStructuredOrder(
+  email: EmailRow,
+  text: string,
+  lines: ParsedLine[]
+) {
+  const poNumber = poFromText(text);
+  const extractedCustomer = customerFromPO(text);
+
+  const customerMatch = await getOrCreateCustomer({
+    supabase,
+    fromEmail: email.from_email,
+    extractedCustomerName: extractedCustomer,
+});
+
+  const customer =
+    customerMatch.customer_name || extractedCustomer || clean(email.from_email);
+
+  const group = await resolveOrderGroup({
+    supabase,
+    email,
+    customerId: customerMatch.customer_id,
+    customerName: customer,
+    poNumber,
+    orderReference: lines[0]?.sku || null,
+    source: "email",
+  });
+
+  for (const line of lines) {
+    await saveOrderItem({
+      email,
+      orderGroupId: group.id,
+      customer,
+      customerMatch,
+      poNumber,
+      action: "Place Order",
+      sku: line.sku,
+      quantity: line.quantity,
+      unitPrice: line.unit_price,
+      totalAmount: line.total_amount,
+      currency: line.currency,
+      notes: line.notes || "Extracted from structured purchase order.",
+      customFields: line.custom_fields,
+    });
+  }
+
+  return lines.length;
+}
+
+async function classifyEmail(text: string) {
   const prompt = `
-You are a strict business email classifier.
+Classify this business email/document into exactly ONE category.
 
-Classify this email into EXACTLY ONE category.
-
-CATEGORIES:
-
-ORDER
-Use ORDER only if the email clearly contains:
-- purchase order
-- order placement
-- instruction to make / produce / ship goods
-- SKU/product with quantity
-- PO document text showing order lines
-- PDF purchase order forms, even if they contain fields like "cancel date", "cancel by", "start/cancel", or "cancellation date"
-
-ENQUIRY
-Use ENQUIRY only if the email contains:
-- question
-- follow up
-- checking status
-- asking for confirmation
-- confirm delivery
-- shipment confirmation
-- delivery update
-- payment clarification
-- availability check
-- sample/query discussion
-- shipping bill status request
-- closure status request
-- invoice/payment clarification where no new order is being placed
-
-CANCELLATION
-Use CANCELLATION only if the buyer clearly and explicitly asks to:
-- cancel an order
-- cancel a PO
-- stop an order
-- stop production
-- cancel shipment
-- remove/cancel items
-- not proceed with order
-- not ship the goods
-
-IGNORE
-Use IGNORE for everything else:
-- marketing
-- newsletters
-- spam
-- OTP
-- ads
-- notifications
-- signatures only
-- irrelevant personal mail
-- calendar invites
-- recruitment emails
-- empty/unclear emails
-- bank promotions
-- automated alerts not related to orders/enquiries/cancellations
-
-CRITICAL CANCELLATION RULES:
-- "cancel date" is NOT a cancellation.
-- "cancellation date" is NOT a cancellation.
-- "cancel by" is NOT a cancellation.
-- "cancel after" is NOT a cancellation.
-- "start/cancel date" is NOT a cancellation.
-- A purchase order PDF with a "cancel date" field is ORDER, not CANCELLATION.
-- Only classify CANCELLATION when there is an explicit instruction to cancel/stop/not proceed.
-- If an email contains a PO/order and also a routine cancel date field, classify as ORDER.
-
-STRICT RULES:
-- "confirm delivery" = ENQUIRY
-- "delivery confirmation" = ENQUIRY
-- "shipping bill status" = ENQUIRY
-- "closure status" = ENQUIRY
-- Promotions = IGNORE
-- Unclear = IGNORE
-- Do not guess
-
-RETURN ONLY ONE WORD:
+Return only one word:
 ORDER
 ENQUIRY
 CANCELLATION
 IGNORE
 
-EMAIL:
-${content}
+ORDER: real order, purchase order, PO attachment, item rows, quantity, price.
+ENQUIRY: question/status/confirmation/payment/delivery follow-up without new order.
+CANCELLATION: explicit cancel/stop/remove/do not proceed/do not ship.
+IGNORE: spam/marketing/OTP/irrelevant/unclear.
+
+Rules:
+- A purchase order PDF with item rows is ORDER.
+- "cancel date" inside a PO is not cancellation.
+
+INPUT:
+${text}
 `;
 
   const res = await openai.chat.completions.create({
@@ -293,61 +490,42 @@ ${content}
     messages: [{ role: "user", content: prompt }],
   });
 
-  const value =
-    res.choices[0]?.message?.content?.trim().toUpperCase() || "IGNORE";
-
-  if (
-    value !== "ORDER" &&
-    value !== "ENQUIRY" &&
-    value !== "CANCELLATION" &&
-    value !== "IGNORE"
-  ) {
-    return "IGNORE";
-  }
-
-  if (value === "CANCELLATION" && !hasExplicitCancellationIntent(content)) {
-    if (hasOrderSignals(content)) return "ORDER";
-    return "ENQUIRY";
-  }
-
-  return value;
+  const value = clean(res.choices[0]?.message?.content).toUpperCase();
+  if (value === "ORDER") return "ORDER";
+  if (value === "ENQUIRY") return "ENQUIRY";
+  if (value === "CANCELLATION") return "CANCELLATION";
+  return "IGNORE";
 }
 
-async function extractStructured(content: string): Promise<ExtractedData> {
+async function extractStructured(text: string): Promise<ExtractedData> {
   const prompt = `
-Extract structured business data from this email / PDF text.
+Extract business data from this email/PDF text.
 
-Return STRICT JSON only in this exact shape:
-
+Return JSON only:
 {
   "customer": "",
   "po_number": "",
   "items": [
     {
       "sku": "",
-      "qty": 0,
+      "quantity": null,
+      "unit_price": null,
+      "currency": "USD",
+      "line_total": null,
       "notes": ""
     }
   ],
   "notes": "",
-  "priority": "low",
   "follow_up_date": ""
 }
 
-IMPORTANT EXTRACTION RULES:
-- For purchase orders, extract PO number from fields like "PO #", "PO:", "Purchase Order".
-- For product/style/article, use the best visible style/article/item code as sku.
-- If the subject contains product/style/article and PDF does not clearly expose SKU, use subject as sku.
-- If quantity is unclear, use 0.
-- If there are multiple visible item/order lines, return multiple items.
-- Do not hallucinate fake values.
-- Notes should be a short useful summary.
-- follow_up_date must be YYYY-MM-DD if clearly available, otherwise blank.
-- priority must be low, medium, or high.
-- Do not treat "cancel date", "cancel after", or "cancellation date" as a cancellation note unless the buyer explicitly asks to cancel.
+Rules:
+- Extract every visible order line.
+- Do not invent quantity or sku.
+- Do not use subject as fake sku.
 
-EMAIL / PDF TEXT:
-${content}
+TEXT:
+${text}
 `;
 
   const res = await openai.chat.completions.create({
@@ -365,199 +543,122 @@ ${content}
       po_number: "",
       items: [],
       notes: "",
-      priority: "low",
       follow_up_date: "",
     };
   }
 }
 
-async function markEmail(params: {
-  emailId: string;
-  status: string;
-  intent?: string | null;
-  error?: string | null;
-}) {
-  const { emailId, status, intent = null, error = null } = params;
+function normalizeAiItem(item: ExtractedItem) {
+  const quantity = num(item.quantity ?? item.qty);
+  const unitPrice = num(item.unit_price ?? item.price);
+  const totalAmount =
+    num(item.line_total ?? item.total_amount) ??
+    (quantity !== null && unitPrice !== null ? quantity * unitPrice : null);
 
-  const payload: Record<string, any> = {
-    processing_status: status,
-    last_processing_error: error,
+  return {
+    sku: clean(
+      item.sku || item.article || item.style || item.item_code || item.product_code
+    ),
+    quantity,
+    unit_price: unitPrice,
+    total_amount: totalAmount,
+    currency: currency(item.currency),
+    notes: clean(item.notes),
   };
-
-  if (intent !== null) {
-    payload.intent = intent;
-  }
-
-  await supabase.from("emails").update(payload).eq("id", emailId);
 }
 
-async function deleteExistingItemsForEmail(email: EmailRow) {
-  if (email.external_message_id) {
-    await supabase
-      .from("order_items")
-      .delete()
-      .eq("external_message_id", email.external_message_id);
-  }
+async function insertAiRows(
+  email: EmailRow,
+  intent: string,
+  structured: ExtractedData,
+  text: string
+) {
+  const poNumber = clean(structured.po_number) || poFromText(text);
+  const extractedCustomer = clean(structured.customer) || customerFromPO(text);
 
-  if (email.gmail_message_id) {
-    await supabase
-      .from("order_items")
-      .delete()
-      .eq("gmail_message_id", email.gmail_message_id);
-  }
-}
-
-async function hasExistingItems(email: EmailRow) {
-  if (email.external_message_id) {
-    const { data } = await supabase
-      .from("order_items")
-      .select("id")
-      .eq("external_message_id", email.external_message_id)
-      .limit(1);
-
-    if (data && data.length > 0) return true;
-  }
-
-  if (email.gmail_message_id) {
-    const { data } = await supabase
-      .from("order_items")
-      .select("id")
-      .eq("gmail_message_id", email.gmail_message_id)
-      .limit(1);
-
-    if (data && data.length > 0) return true;
-  }
-
-  return false;
-}
-
-async function insertOrderItems(params: {
-  email: EmailRow;
-  intent: "ORDER" | "ENQUIRY" | "CANCELLATION";
-  structured: ExtractedData;
-  combinedText: string;
-}) {
-  const { email, intent, structured, combinedText } = params;
-
-  const externalMessageId = getExternalMessageId(email);
-  const gmailMessageId = getGmailMessageId(email);
-  const normalizedItems = normalizeItems(structured.items);
-
-  const customerMatch = await findCustomerForEmail({
+  const customerMatch = await getOrCreateCustomer({
     supabase,
     fromEmail: email.from_email,
-    extractedCustomerName: structured.customer || "",
-  });
+    extractedCustomerName: extractedCustomer,
+});
 
   const customer =
-    customerMatch.customer_name || cleanText(structured.customer || "");
-
-  const poNumber =
-    cleanText(structured.po_number || "") || extractPoFallback(combinedText);
-
-  const baseNotes =
-    cleanText(structured.notes || "") ||
-    cleanText(email.subject || "") ||
-    "Extracted from email / attachment";
-
-  const customerLinkPayload = {
-    customer_id: customerMatch.customer_id,
-    customer_match_method: customerMatch.customer_match_method,
-    customer_match_confidence: customerMatch.customer_match_confidence,
-  };
+    customerMatch.customer_name || extractedCustomer || clean(email.from_email);
 
   if (intent === "ORDER") {
-    let validItems = normalizedItems.filter((item) => item.sku);
+    const items = (structured.items || [])
+      .map(normalizeAiItem)
+      .filter((item) => item.sku);
 
-    if (validItems.length === 0) {
-      validItems = [
-        {
-          sku: fallbackSkuFromSubject(email.subject),
-          quantity: 0,
-          notes: baseNotes,
-        },
-      ];
-    }
+    const group = await resolveOrderGroup({
+      supabase,
+      email,
+      customerId: customerMatch.customer_id,
+      customerName: customer,
+      poNumber,
+      orderReference: items[0]?.sku || null,
+      source: "email",
+    });
 
-    for (const item of validItems) {
-      await supabase.from("order_items").insert({
-        action: "Place Order",
+    for (const item of items) {
+      await saveOrderItem({
+        email,
+        orderGroupId: group.id,
         customer,
-        po_number: poNumber,
-        sku: item.sku || fallbackSkuFromSubject(email.subject),
-        quantity: item.quantity || null,
-        notes: item.notes || baseNotes,
-        status: "New",
-        source_email: email.from_email || "",
-        external_message_id: externalMessageId,
-        gmail_message_id: gmailMessageId,
-        email_subject: email.subject || "",
-        ...customerLinkPayload,
+        customerMatch,
+        poNumber,
+        action: "Place Order",
+        sku: item.sku,
+        quantity: item.quantity,
+        unitPrice: item.unit_price,
+        totalAmount: item.total_amount,
+        currency: item.currency,
+        notes: item.notes || clean(structured.notes),
       });
     }
 
-    return validItems.length;
+    return items.length;
   }
 
-  if (intent === "ENQUIRY") {
-    await supabase.from("order_items").insert({
-      action: "Reply to Enquiry",
-      customer,
-      po_number: poNumber,
-      sku:
-        normalizedItems
-          .map((item) => item.sku)
-          .filter(Boolean)
-          .join(", ") || "",
-      quantity:
-        normalizedItems.reduce(
-          (sum, item) => sum + Number(item.quantity || 0),
-          0
-        ) || null,
-      notes: baseNotes,
-      status: "Pending",
-      source_email: email.from_email || "",
-      external_message_id: externalMessageId,
-      gmail_message_id: gmailMessageId,
-      email_subject: email.subject || "",
-      follow_up_due_at: structured.follow_up_date || null,
-      ...customerLinkPayload,
-    });
+  await supabase.from("order_items").insert({
+    action: intent === "CANCELLATION" ? "Cancel Order" : "Reply to Enquiry",
+    customer,
+    customer_id: customerMatch.customer_id,
+    customer_match_method: customerMatch.customer_match_method,
+    customer_match_confidence: customerMatch.customer_match_confidence,
+    po_number: poNumber,
+    sku: "",
+    quantity: null,
+    notes: clean(structured.notes) || clean(email.subject),
+    status: "Pending",
+    source_email: email.from_email || "",
+    parent_email_id: email.id,
+    external_message_id: externalId(email),
+    gmail_message_id: email.gmail_message_id,
+    email_subject: email.subject || "",
+    follow_up_due_at: structured.follow_up_date || null,
+    created_at: new Date().toISOString(),
+  });
 
-    return 1;
-  }
-
-  if (intent === "CANCELLATION") {
-    await supabase.from("order_items").insert({
-      action: "Cancel Order",
-      customer,
-      po_number: poNumber,
-      sku:
-        normalizedItems
-          .map((item) => item.sku)
-          .filter(Boolean)
-          .join(", ") || "",
-      quantity:
-        normalizedItems.reduce(
-          (sum, item) => sum + Number(item.quantity || 0),
-          0
-        ) || null,
-      notes: baseNotes,
-      status: "Pending",
-      source_email: email.from_email || "",
-      external_message_id: externalMessageId,
-      gmail_message_id: gmailMessageId,
-      email_subject: email.subject || "",
-      ...customerLinkPayload,
-    });
-
-    return 1;
-  }
-
-  return 0;
+  return 1;
 }
 
 async function processEmail(email: EmailRow, force: boolean) {
+  if (email.direction === "OUTBOUND") {
+    await markEmail(
+      email.id,
+      "ignored",
+      "ignored",
+      "Outbound email permanently ignored"
+    );
+
+    return {
+      id: email.id,
+      ignored: true,
+      reason: "outbound_email",
+    };
+  }
+
   if (shouldSkipEmail(email, force)) {
     return {
       id: email.id,
@@ -566,109 +667,118 @@ async function processEmail(email: EmailRow, force: boolean) {
     };
   }
 
-  const bodyText = cleanText(email.body_text || "");
-  const attachmentText = cleanText(email.attachment_text || "");
-  const combinedText = cleanText(`${bodyText}\n\n${attachmentText}`);
+  const text = keepLines(`${email.body_text || ""}\n\n${email.attachment_text || ""}`);
 
   if (hasAttachmentWithoutText(email) && !force) {
-    await markEmail({
-      emailId: email.id,
-      status: "needs_ocr",
-      error: null,
-    });
-
-    return {
-      id: email.id,
-      skipped: true,
-      reason: "needs_ocr",
-      attachment_url: email.attachment_url,
-    };
+    await markEmail(email.id, "needs_ocr");
+    return { id: email.id, skipped: true, reason: "needs_ocr" };
   }
 
-  if (!combinedText || combinedText.length < 10) {
-    await markEmail({
-      emailId: email.id,
-      status: "ignored",
-      intent: "ignored",
-      error: "No useful email body or attachment text",
-    });
-
-    return {
-      id: email.id,
-      ignored: true,
-      reason: "empty_or_too_short",
-    };
+  if (!clean(text) || clean(text).length < 10) {
+    await markEmail(
+      email.id,
+      "ignored",
+      "ignored",
+      "No useful email body or attachment text"
+    );
+    return { id: email.id, ignored: true };
   }
-
-  const intent = await classifyEmail(combinedText);
-
-  if (intent === "IGNORE") {
-    await markEmail({
-      emailId: email.id,
-      status: "ignored",
-      intent: "ignored",
-      error: null,
-    });
-
-    await deleteExistingItemsForEmail(email);
-
-    return {
-      id: email.id,
-      ignored: true,
-      intent,
-    };
-  }
-
-  const structured = await extractStructured(combinedText);
 
   if (force) {
-    await deleteExistingItemsForEmail(email);
+    await deleteExistingItems(email);
   }
 
-  const existing = force ? false : await hasExistingItems(email);
+  const deterministicLines = parseStructuredPO(text);
+  const poNumber = poFromText(text);
 
-  let insertedItems = 0;
-
-  if (!existing) {
-    insertedItems = await insertOrderItems({
+  if (deterministicLines.length > 0 && poNumber && hasOrderSignals(text)) {
+    const insertedItems = await insertStructuredOrder(
       email,
-      intent: intent as "ORDER" | "ENQUIRY" | "CANCELLATION",
-      structured,
-      combinedText,
-    });
-  }
+      text,
+      deterministicLines
+    );
 
-  if (insertedItems === 0 && !existing) {
-    await markEmail({
-      emailId: email.id,
-      status: "failed",
-      intent: intent.toLowerCase(),
-      error: `Intent ${intent} found but no order_items inserted`,
-    });
+    await markEmail(email.id, "processed", "order");
 
     return {
       id: email.id,
-      ok: false,
-      intent,
+      processed: true,
+      intent: "ORDER",
       insertedItems,
-      error: "No order_items inserted",
+      extraction: "deterministic_po_parser",
     };
   }
 
-  await markEmail({
-    emailId: email.id,
-    status: "processed",
-    intent: intent.toLowerCase(),
-    error: null,
-  });
+  const intent = await classifyEmail(text);
 
-  return {
-    id: email.id,
-    processed: true,
-    intent,
-    insertedItems,
-    existingItems: existing,
-  };
+  if (intent === "IGNORE") {
+    await deleteExistingItems(email);
+    await markEmail(email.id, "ignored", "ignored");
+    return { id: email.id, ignored: true, intent };
+  }
+
+const structured = await extractStructured(text);
+
+const normalizedItems = (structured.items || []).map(normalizeAiItem);
+
+const validation = validateOrderCandidate({
+  subject: email.subject,
+  text,
+  poNumber: structured.po_number,
+  items: normalizedItems,
+});
+
+const enquiryValidation = validateEnquiryCandidate({
+  subject: email.subject,
+  text,
+});
+
+const cancellationValidation = validateCancellationCandidate({
+  subject: email.subject,
+  text,
+});
+
+let finalIntent = intent;
+
+if (cancellationValidation.isCancellation) {
+  finalIntent = "CANCELLATION";
+}
+
+if (intent === "ORDER" && !validation.isOrder) {
+  finalIntent = enquiryValidation.isEnquiry ? "ENQUIRY" : "IGNORE";
+}
+
+const insertedItems = await insertAiRows(
+  email,
+  finalIntent,
+  structured,
+  text
+);
+
+  if (insertedItems === 0) {
+    await markEmail(
+      email.id,
+      "failed",
+      intent.toLowerCase(),
+      `Intent ${intent} found but no rows inserted`
+    );
+
+    return { id: email.id, ok: false, intent, insertedItems };
+  }
+
+await markEmail(
+  email.id,
+  "processed",
+  finalIntent.toLowerCase()
+);
+
+return {
+  id: email.id,
+  processed: true,
+  intent: finalIntent,
+  validator: validation,
+  insertedItems,
+};
 }
 
 export async function GET(req: NextRequest) {
@@ -707,19 +817,19 @@ export async function GET(req: NextRequest) {
 
     for (const email of emails) {
       try {
-        const result = await processEmail(email, force);
-        results.push(result);
-      } catch (emailError: any) {
-        await markEmail({
-          emailId: email.id,
-          status: "failed",
-          error: emailError?.message || String(emailError),
-        });
+        results.push(await processEmail(email, force));
+      } catch (error: any) {
+        await markEmail(
+          email.id,
+          "failed",
+          undefined,
+          error?.message || String(error)
+        );
 
         results.push({
           id: email.id,
           ok: false,
-          error: emailError?.message || String(emailError),
+          error: error?.message || String(error),
         });
       }
     }
@@ -741,4 +851,8 @@ export async function GET(req: NextRequest) {
       { status: 500 }
     );
   }
+}
+
+export async function POST(req: NextRequest) {
+  return GET(req);
 }

@@ -18,6 +18,7 @@ type EnquiryItem = {
   follow_up_due_at: string | null;
   external_message_id: string | null;
   gmail_message_id: string | null;
+  parent_email_id: string | null;
 };
 
 type EmailRow = {
@@ -159,13 +160,22 @@ function getMessageKey(item: EnquiryItem) {
   );
 }
 
+function stripReplyPrefix(value: string | null | undefined) {
+  return normalise(value)
+    .replace(/^(re|fw|fwd|res)\s*:\s*/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function getGroupKey(item: EnquiryItem) {
-  return [
-    getMessageKey(item),
-    normalise(item.customer),
-    normalise(item.action),
-    normalise(item.email_subject),
-  ].join("::");
+  const customer = normalise(item.customer);
+  const subject = stripReplyPrefix(item.email_subject);
+
+  if (subject) {
+    return ["enquiry-subject", customer, subject].join("::");
+  }
+
+  return ["enquiry-message", customer, getMessageKey(item)].join("::");
 }
 
 function getGroupItemIds(items: EnquiryItem[]) {
@@ -175,13 +185,11 @@ function getGroupItemIds(items: EnquiryItem[]) {
 function findEmailForItem(params: {
   item: EnquiryItem;
   emailByMessageId: Map<string, EmailRow>;
-  emailBySubject: Map<string, EmailRow>;
 }) {
-  const { item, emailByMessageId, emailBySubject } = params;
+  const { item, emailByMessageId } = params;
 
   const externalMessageId = clean(item.external_message_id);
   const gmailMessageId = clean(item.gmail_message_id);
-  const subject = normalise(item.email_subject);
 
   if (externalMessageId && emailByMessageId.has(externalMessageId)) {
     return emailByMessageId.get(externalMessageId) || null;
@@ -189,10 +197,6 @@ function findEmailForItem(params: {
 
   if (gmailMessageId && emailByMessageId.has(gmailMessageId)) {
     return emailByMessageId.get(gmailMessageId) || null;
-  }
-
-  if (subject && emailBySubject.has(subject)) {
-    return emailBySubject.get(subject) || null;
   }
 
   return null;
@@ -225,7 +229,7 @@ export default async function EnquiriesPage({
   const { data, error } = await supabase
     .from("order_items")
     .select(
-      "id, customer, sku, quantity, notes, status, email_subject, action, follow_up_due_at, external_message_id, gmail_message_id"
+      "id, customer, sku, quantity, notes, status, email_subject, action, follow_up_due_at, external_message_id, gmail_message_id, parent_email_id"
     )
     .is("deleted_at", null)
     .in("action", ["Reply to Enquiry", "Follow Up", "Confirm Delivery"]);
@@ -250,7 +254,6 @@ export default async function EnquiriesPage({
     .limit(5000);
 
   const emailByMessageId = new Map<string, EmailRow>();
-  const emailBySubject = new Map<string, EmailRow>();
 
   for (const email of (emailRows ?? []) as EmailRow[]) {
     if (email.external_message_id) {
@@ -259,12 +262,6 @@ export default async function EnquiriesPage({
 
     if (email.gmail_message_id) {
       emailByMessageId.set(email.gmail_message_id, email);
-    }
-
-    const subjectKey = normalise(email.subject);
-
-    if (subjectKey && !emailBySubject.has(subjectKey)) {
-      emailBySubject.set(subjectKey, email);
     }
   }
 
@@ -287,7 +284,6 @@ export default async function EnquiriesPage({
       const email = findEmailForItem({
         item: first,
         emailByMessageId,
-        emailBySubject,
       });
 
       return {
@@ -450,8 +446,7 @@ export default async function EnquiriesPage({
                 <th className="p-3 border text-left">Select</th>
                 <th className="p-3 border text-left">Received On</th>
                 <th className="p-3 border text-left">Customer</th>
-                <th className="p-3 border text-left">SKU</th>
-                <th className="p-3 border text-left">Quantity</th>
+                <th className="p-3 border text-left">Items</th>
                 <th className="p-3 border text-left">Query</th>
                 <th className="p-3 border text-left">Priority</th>
                 <th className="p-3 border text-left">Action</th>
@@ -462,7 +457,7 @@ export default async function EnquiriesPage({
             <tbody>
               {sortedRows.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="p-6 text-center text-gray-500">
+                  <td colSpan={8} className="p-6 text-center text-gray-500">
                     No items found
                   </td>
                 </tr>
@@ -471,6 +466,13 @@ export default async function EnquiriesPage({
                   const firstItem = row.items[0];
                   const priority = getPriorityMeta(row);
                   const groupIds = getGroupItemIds(row.items);
+
+                  const parentEmailId =
+                    firstItem.parent_email_id || row.email_id || "";
+
+                  const rowHref = parentEmailId
+                    ? `/emails/${parentEmailId}`
+                    : "";
 
                   return (
                     <tr key={row.key} className="hover:bg-gray-50">
@@ -484,30 +486,37 @@ export default async function EnquiriesPage({
                       </td>
 
                       <td className="p-3 border whitespace-nowrap">
-                        {formatDateTime(row.received_at)}
-                      </td>
-
-                      <td className="p-3 border">{row.customer}</td>
-
-                      <td className="p-3 border">
-                        <div className="space-y-1">
-                          {row.items.map((item) => (
-                            <div key={item.id}>{item.sku || ""}</div>
-                          ))}
-                        </div>
+                        {rowHref ? (
+                          <Link href={rowHref} className="block">
+                            {formatDateTime(row.received_at)}
+                          </Link>
+                        ) : (
+                          formatDateTime(row.received_at)
+                        )}
                       </td>
 
                       <td className="p-3 border">
-                        <div className="space-y-1">
-                          {row.items.map((item) => (
-                            <div key={item.id}>{item.quantity ?? ""}</div>
-                          ))}
+                        {rowHref ? (
+                          <Link href={rowHref} className="block">
+                            {row.customer}
+                          </Link>
+                        ) : (
+                          row.customer
+                        )}
+                      </td>
+
+                      <td className="p-3 border">
+                        <div className="font-semibold text-gray-900">
+                          {row.items.length}{" "}
+                          {row.items.length === 1 ? "Item" : "Items"}
                         </div>
                       </td>
 
                       <td className="p-3 border">
                         <div className="space-y-2">
-                          <div>{row.query}</div>
+                          <div className="line-clamp-2 max-w-[420px] text-sm">
+                            {row.query}
+                          </div>
 
                           {row.follow_up_due_at && (
                             <div className="text-xs text-gray-500">
@@ -538,9 +547,9 @@ export default async function EnquiriesPage({
                             Reply
                           </Link>
 
-                          {row.email_id ? (
+                          {rowHref ? (
                             <Link
-                              href={`/emails/${row.email_id}`}
+                              href={rowHref}
                               className="px-4 py-2 rounded-lg text-sm bg-blue-100 text-blue-700 hover:bg-blue-200 text-center"
                             >
                               Original Email

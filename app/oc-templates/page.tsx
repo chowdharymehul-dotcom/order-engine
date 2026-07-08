@@ -290,7 +290,7 @@ export default async function OCTemplatesPage() {
                       <td className="p-3 border">
                         {draft ? (
                           <Link
-                            href={`/oc-templates/${template.id}/ai-review?draft=${draft.id}`}
+                            href={`/oc-templates/${template.id}/preview?draft=${draft.id}`}
                             className="text-blue-700 hover:underline"
                           >
                             {draft.status || "draft"}
@@ -339,12 +339,18 @@ export default async function OCTemplatesPage() {
                             </button>
                           </form>
 
-                          <Link
-                            href={`/oc-templates/${template.id}/designer`}
-                            className="px-4 py-2 rounded-lg bg-gray-200 text-gray-900 border border-gray-300 hover:bg-gray-300"
-                          >
-                            Edit Template
-                          </Link>
+{draft ? (
+  <Link
+    href={`/oc-templates/${template.id}/sample-editor?draft=${draft.id}`}
+    className="px-4 py-2 rounded-lg bg-green-50 text-green-700 border border-green-200 hover:bg-green-100"
+  >
+    Edit Sample OC Draft
+  </Link>
+) : (
+  <span className="px-4 py-2 rounded-lg bg-gray-100 text-gray-400 border border-gray-200">
+    Edit Sample OC Draft
+  </span>
+)}
 
                           <form action="/api/oc-templates/delete" method="POST">
                             <input

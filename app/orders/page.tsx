@@ -5,9 +5,33 @@ import Link from "next/link";
 import { createClient } from "@supabase/supabase-js";
 import AutoRefresh from "@/components/AutoRefresh";
 import BulkSelectionControls from "@/components/BulkSelectionControls";
+import GenerateOCButton from "@/components/orders/GenerateOCButton";
+
+type OrderGroup = {
+  id: string;
+  parent_email_id: string | null;
+  latest_email_id: string | null;
+  last_activity_email_id: string | null;
+  external_thread_id: string | null;
+  customer_id: string | null;
+  customer_name: string | null;
+  po_number: string | null;
+  group_key: string;
+  subject: string | null;
+  status: string | null;
+  oc_status: string | null;
+  oc_document_id: string | null;
+  oc_pdf_url: string | null;
+  last_activity_at: string | null;
+  has_new_activity: boolean | null;
+  new_activity_count: number | null;
+  source: string | null;
+  created_at: string | null;
+};
 
 type OrderItem = {
   id: string;
+  order_group_id: string | null;
   action: string | null;
   customer: string | null;
   po_number: string | null;
@@ -15,10 +39,6 @@ type OrderItem = {
   quantity: number | null;
   notes: string | null;
   status: string | null;
-  source_email: string | null;
-  email_subject: string | null;
-  external_message_id: string | null;
-  gmail_message_id: string | null;
   oc_pdf_url: string | null;
   oc_status: string | null;
   oc_document_id: string | null;
@@ -26,28 +46,15 @@ type OrderItem = {
 
 type EmailRow = {
   id: string;
-  external_message_id: string | null;
-  gmail_message_id: string | null;
-  received_at: string | null;
   subject: string | null;
+  received_at: string | null;
   from_email: string | null;
 };
 
-type GroupedOrder = {
-  key: string;
-  email_id: string | null;
-  received_at: string | null;
-  received_sort: number;
-  action: string;
-  customer: string;
-  po_number: string;
-  notes: string;
-  status: string;
-  original_mail: string;
-  oc_pdf_url: string | null;
-  oc_status: string;
-  oc_document_id: string | null;
-  items: OrderItem[];
+type SellerProfile = {
+  id: string;
+  profile_name: string | null;
+  company_name: string | null;
 };
 
 type OrdersPageProps = {
@@ -66,22 +73,11 @@ function normalise(value: string | null | undefined) {
   return clean(value).toLowerCase().replace(/\s+/g, " ");
 }
 
-function tabClass(active: boolean) {
-  return `px-5 py-3 rounded-lg border text-sm font-medium transition ${
-    active
-      ? "bg-gray-100 border-gray-400 text-black"
-      : "bg-white text-black hover:bg-gray-50"
-  }`;
-}
-
 function formatDateTime(value: string | null) {
-  if (!value) return "Missing email date";
+  if (!value) return "Missing date";
 
   const date = new Date(value);
-
-  if (Number.isNaN(date.getTime())) {
-    return "Invalid email date";
-  }
+  if (Number.isNaN(date.getTime())) return "Invalid date";
 
   return date.toLocaleString("en-IN", {
     timeZone: "Asia/Kolkata",
@@ -94,82 +90,78 @@ function formatDateTime(value: string | null) {
   });
 }
 
-function getGroupStatus(items: OrderItem[]) {
+function tabClass(active: boolean) {
+  return `px-5 py-3 rounded-lg border text-sm font-medium transition ${
+    active
+      ? "bg-gray-100 border-gray-400 text-black"
+      : "bg-white text-black hover:bg-gray-50"
+  }`;
+}
+
+function getItemIds(items: OrderItem[]) {
+  return items.map((item) => item.id).join(",");
+}
+
+function getGroupStatus(group: OrderGroup, items: OrderItem[]) {
   const statuses = items.map((item) => item.status || "New");
 
   if (statuses.some((status) => status === "New")) return "New";
   if (statuses.some((status) => status === "Approved")) return "Approved";
-  if (statuses.every((status) => status === "Done")) return "Done";
+  if (statuses.length > 0 && statuses.every((status) => status === "Done")) {
+    return "Done";
+  }
 
-  return statuses[0] || "New";
+  return group.status || statuses[0] || "New";
 }
 
-function getMessageKey(item: OrderItem) {
+function getOcStatus(group: OrderGroup, items: OrderItem[]) {
   return (
-    clean(item.external_message_id) ||
-    clean(item.gmail_message_id) ||
-    clean(item.email_subject) ||
-    clean(item.id)
+    group.oc_status ||
+    items.find((item) => item.oc_status)?.oc_status ||
+    "Not Generated"
   );
 }
 
-function getGroupKey(item: OrderItem) {
-  return [
-    getMessageKey(item),
-    normalise(item.customer),
-    normalise(item.po_number),
-    normalise(item.email_subject),
-  ].join("::");
+function getOcDocumentId(group: OrderGroup, items: OrderItem[]) {
+  return (
+    group.oc_document_id ||
+    items.find((item) => item.oc_document_id)?.oc_document_id ||
+    null
+  );
 }
 
-function getGroupItemIds(items: OrderItem[]) {
-  return items.map((item) => item.id).join(",");
+function getOcPdfUrl(group: OrderGroup, items: OrderItem[]) {
+  return (
+    group.oc_pdf_url ||
+    items.find((item) => item.oc_pdf_url)?.oc_pdf_url ||
+    null
+  );
 }
 
-function findEmailForItem(params: {
-  item: OrderItem;
-  emailByMessageId: Map<string, EmailRow>;
-  emailBySubject: Map<string, EmailRow>;
+function matchesSearch(params: {
+  group: OrderGroup;
+  items: OrderItem[];
+  email: EmailRow | null;
+  query: string;
 }) {
-  const { item, emailByMessageId, emailBySubject } = params;
+  const { group, items, email, query } = params;
 
-  const externalMessageId = clean(item.external_message_id);
-  const gmailMessageId = clean(item.gmail_message_id);
-  const subject = normalise(item.email_subject);
-
-  if (externalMessageId && emailByMessageId.has(externalMessageId)) {
-    return emailByMessageId.get(externalMessageId) || null;
-  }
-
-  if (gmailMessageId && emailByMessageId.has(gmailMessageId)) {
-    return emailByMessageId.get(gmailMessageId) || null;
-  }
-
-  if (subject && emailBySubject.has(subject)) {
-    return emailBySubject.get(subject) || null;
-  }
-
-  return null;
-}
-
-function matchesSearch(order: GroupedOrder, query: string) {
   if (!query) return true;
 
   const q = query.toLowerCase();
 
   const haystack = [
-    order.key,
-    order.customer,
-    order.po_number,
-    order.notes,
-    order.status,
-    order.original_mail,
-    order.oc_status,
-    order.received_at || "",
-    ...order.items.map((item) => item.sku || ""),
-    ...order.items.map((item) => String(item.quantity || "")),
-    ...order.items.map((item) => item.gmail_message_id || ""),
-    ...order.items.map((item) => item.external_message_id || ""),
+    group.id,
+    group.customer_name || "",
+    group.po_number || "",
+    group.subject || "",
+    group.status || "",
+    group.oc_status || "",
+    email?.subject || "",
+    email?.from_email || "",
+    ...items.map((item) => item.sku || ""),
+    ...items.map((item) => String(item.quantity || "")),
+    ...items.map((item) => item.notes || ""),
   ]
     .join(" ")
     .toLowerCase();
@@ -189,135 +181,132 @@ export default async function OrdersPage({ searchParams }: OrdersPageProps) {
     process.env.SUPABASE_SERVICE_ROLE_KEY!
   );
 
-  const { data, error } = await supabase
-    .from("order_items")
+  const { data: groupsData, error: groupsError } = await supabase
+    .from("order_groups")
     .select(
-      "id, action, customer, po_number, sku, quantity, notes, status, source_email, email_subject, external_message_id, gmail_message_id, oc_pdf_url, oc_status, oc_document_id"
+      "id, parent_email_id, latest_email_id, last_activity_email_id, external_thread_id, customer_id, customer_name, po_number, group_key, subject, status, oc_status, oc_document_id, oc_pdf_url, last_activity_at, has_new_activity, new_activity_count, source, created_at"
     )
-    .is("deleted_at", null)
-    .ilike("action", "Place Order");
+    .order("last_activity_at", { ascending: false })
+    .limit(500);
 
-  if (error) {
+  if (groupsError) {
     return (
       <div className="p-10">
         <h1 className="text-3xl font-bold mb-6">Orders Dashboard</h1>
-        <p className="text-red-600">Error loading orders: {error.message}</p>
+        <p className="text-red-600">
+          Error loading order groups: {groupsError.message}
+        </p>
       </div>
     );
   }
 
-  const items = (data ?? []) as OrderItem[];
+  const groups = (groupsData || []) as OrderGroup[];
+  const groupIds = groups.map((group) => group.id);
 
-  const { data: emailRows } = await supabase
-    .from("emails")
-    .select(
-      "id, external_message_id, gmail_message_id, received_at, subject, from_email"
-    )
-    .order("received_at", { ascending: false })
-    .limit(5000);
+  const { data: itemsData } =
+    groupIds.length > 0
+      ? await supabase
+          .from("order_items")
+          .select(
+            "id, order_group_id, action, customer, po_number, sku, quantity, notes, status, oc_pdf_url, oc_status, oc_document_id"
+          )
+          .is("deleted_at", null)
+          .in("order_group_id", groupIds)
+          .ilike("action", "Place Order")
+      : { data: [] };
 
-  const emailByMessageId = new Map<string, EmailRow>();
-  const emailBySubject = new Map<string, EmailRow>();
+  const items = (itemsData || []) as OrderItem[];
 
-  for (const email of (emailRows ?? []) as EmailRow[]) {
-    if (email.external_message_id) {
-      emailByMessageId.set(email.external_message_id, email);
-    }
-
-    if (email.gmail_message_id) {
-      emailByMessageId.set(email.gmail_message_id, email);
-    }
-
-    const subjectKey = normalise(email.subject);
-
-    if (subjectKey && !emailBySubject.has(subjectKey)) {
-      emailBySubject.set(subjectKey, email);
-    }
-  }
-
-  const groupedMap = new Map<string, OrderItem[]>();
+  const itemsByGroupId = new Map<string, OrderItem[]>();
 
   for (const item of items) {
-    const key = getGroupKey(item);
+    const groupId = clean(item.order_group_id);
+    if (!groupId) continue;
 
-    if (!groupedMap.has(key)) {
-      groupedMap.set(key, []);
+    if (!itemsByGroupId.has(groupId)) {
+      itemsByGroupId.set(groupId, []);
     }
 
-    groupedMap.get(key)!.push(item);
+    itemsByGroupId.get(groupId)!.push(item);
   }
 
-  const groupedOrders: GroupedOrder[] = Array.from(groupedMap.entries()).map(
-    ([key, groupItems]) => {
-      const first = groupItems[0];
-
-      const email = findEmailForItem({
-        item: first,
-        emailByMessageId,
-        emailBySubject,
-      });
-
-      const receivedAt = email?.received_at || null;
-      const receivedSort = receivedAt ? new Date(receivedAt).getTime() : 0;
-
-      const ocPdfUrl =
-        groupItems.find((item) => item.oc_pdf_url)?.oc_pdf_url || null;
-
-      const ocDocumentId =
-        groupItems.find((item) => item.oc_document_id)?.oc_document_id || null;
-
-      const ocStatus =
-        groupItems.find((item) => item.oc_status)?.oc_status ||
-        "Not Generated";
-
-      return {
-        key,
-        email_id: email?.id || null,
-        received_at: receivedAt,
-        received_sort: Number.isNaN(receivedSort) ? 0 : receivedSort,
-        action: "New Order",
-        customer: first.customer || "",
-        po_number: first.po_number || "",
-        notes:
-          groupItems
-            .map((item) => item.notes)
-            .filter(Boolean)
-            .join(" | ") || "",
-        status: getGroupStatus(groupItems),
-        original_mail:
-          email?.subject ||
-          first.email_subject ||
-          first.source_email ||
-          "Original email not linked",
-        oc_pdf_url: ocPdfUrl,
-        oc_status: ocStatus,
-        oc_document_id: ocDocumentId,
-        items: groupItems,
-      };
-    }
+  const emailIds = Array.from(
+    new Set(
+      groups
+        .flatMap((group) => [
+          group.last_activity_email_id,
+          group.latest_email_id,
+          group.parent_email_id,
+        ])
+        .filter((id): id is string => !!id)
+    )
   );
 
-  const filteredOrders = groupedOrders.filter((order) => {
-    if (activeAction !== "all" && activeAction !== "new_order") {
-      return false;
-    }
+  const { data: emailRows } =
+    emailIds.length > 0
+      ? await supabase
+          .from("emails")
+          .select("id, subject, received_at, from_email")
+          .eq("direction", "INBOUND")
+          .in("id", emailIds)
+      : { data: [] };
+
+  const emailById = new Map<string, EmailRow>();
+
+  for (const email of (emailRows || []) as EmailRow[]) {
+    emailById.set(email.id, email);
+  }
+
+  const { data: sellerRows } = await supabase
+    .from("seller_profiles")
+    .select("id, profile_name, company_name")
+    .eq("is_active", true)
+    .order("is_default", { ascending: false })
+    .order("company_name", { ascending: true });
+
+  const sellers = ((sellerRows || []) as SellerProfile[]).map((seller) => ({
+    id: seller.id,
+    label: seller.profile_name || seller.company_name || "Unnamed Seller",
+  }));
+
+  const hydratedGroups = groups
+    .map((group) => {
+      const groupItems = itemsByGroupId.get(group.id) || [];
+
+      const activityEmail =
+        emailById.get(clean(group.last_activity_email_id)) ||
+        emailById.get(clean(group.latest_email_id)) ||
+        emailById.get(clean(group.parent_email_id)) ||
+        null;
+
+      return {
+        group,
+        items: groupItems,
+        email: activityEmail,
+        status: getGroupStatus(group, groupItems),
+        ocStatus: getOcStatus(group, groupItems),
+        ocDocumentId: getOcDocumentId(group, groupItems),
+        ocPdfUrl: getOcPdfUrl(group, groupItems),
+      };
+    })
+    .filter((row) => row.items.length > 0);
+
+  const filteredRows = hydratedGroups.filter((row) => {
+    if (activeAction !== "all" && activeAction !== "new_order") return false;
 
     if (
       activeStatus !== "all" &&
-      order.status.toLowerCase() !== activeStatus.toLowerCase()
+      row.status.toLowerCase() !== activeStatus.toLowerCase()
     ) {
       return false;
     }
 
-    return matchesSearch(order, searchQuery);
-  });
-
-  const sortedOrders = [...filteredOrders].sort((a, b) => {
-    if (a.received_sort !== b.received_sort) {
-      return b.received_sort - a.received_sort;
-    }
-
-    return String(b.key).localeCompare(String(a.key));
+    return matchesSearch({
+      group: row.group,
+      items: row.items,
+      email: row.email,
+      query: searchQuery,
+    });
   });
 
   return (
@@ -329,34 +318,41 @@ export default async function OrdersPage({ searchParams }: OrdersPageProps) {
 
         <div className="flex gap-3">
           <Link
-            href="/emails"
-            className="px-4 py-2 border rounded-lg hover:bg-gray-50"
+            href="/orders/new"
+            className="px-4 py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-700"
           >
-            Emails
+            + New Manual Order / OC
           </Link>
 
           <Link
-            href="/enquiries-follow-up"
-            className="px-4 py-2 border rounded-lg hover:bg-gray-50"
+            href="/orders/manual"
+            className="px-4 py-2 rounded-lg bg-orange-50 text-orange-700 border border-orange-200 hover:bg-orange-100"
           >
-            Enquiries
+            Manual Orders
           </Link>
 
           <Link
-            href="/cancellations"
-            className="px-4 py-2 border rounded-lg hover:bg-gray-50"
+            href="/order-confirmations"
+            className="px-4 py-2 rounded-lg bg-green-50 text-green-700 border border-green-200 hover:bg-green-100"
           >
-            Cancellations
+            Order Confirmations
           </Link>
 
           <Link
             href="/oc-templates"
-            className="px-4 py-2 border rounded-lg hover:bg-gray-50"
+            className="px-4 py-2 rounded-lg bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100"
           >
             OC Templates
           </Link>
         </div>
       </div>
+
+      {sellers.length === 0 && (
+        <div className="p-4 rounded-lg bg-yellow-50 text-yellow-800 border border-yellow-200">
+          No active seller profile found. Create a seller profile before
+          generating an OC.
+        </div>
+      )}
 
       <div className="bg-white border rounded-xl p-6 space-y-6">
         <form className="flex gap-3" action="/orders" method="GET">
@@ -366,7 +362,7 @@ export default async function OrdersPage({ searchParams }: OrdersPageProps) {
           <input
             name="q"
             defaultValue={searchQuery}
-            placeholder="Search by SKU, customer, PO, subject, message ID..."
+            placeholder="Search by SKU, customer, PO, subject..."
             className="w-full border rounded-lg px-4 py-3 text-sm"
           />
 
@@ -450,8 +446,8 @@ export default async function OrdersPage({ searchParams }: OrdersPageProps) {
       </div>
 
       <div className="text-sm text-gray-600">
-        Showing {sortedOrders.length} grouped orders. Latest received emails are
-        shown first.
+        Showing {filteredRows.length} order groups. Latest activity is shown
+        first.
       </div>
 
       <BulkSelectionControls
@@ -471,13 +467,11 @@ export default async function OrdersPage({ searchParams }: OrdersPageProps) {
             <thead>
               <tr className="bg-gray-100">
                 <th className="p-3 border text-left">Select</th>
-                <th className="p-3 border text-left">Received On</th>
+                <th className="p-3 border text-left">Last Activity</th>
                 <th className="p-3 border text-left">Action</th>
                 <th className="p-3 border text-left">Customer</th>
                 <th className="p-3 border text-left">PO Number</th>
-                <th className="p-3 border text-left">SKU</th>
-                <th className="p-3 border text-left">Quantity</th>
-                <th className="p-3 border text-left">Notes</th>
+                <th className="p-3 border text-left">Items</th>
                 <th className="p-3 border text-left">Status</th>
                 <th className="p-3 border text-left">OC</th>
                 <th className="p-3 border text-left">Original Mail</th>
@@ -486,61 +480,115 @@ export default async function OrdersPage({ searchParams }: OrdersPageProps) {
             </thead>
 
             <tbody>
-              {sortedOrders.length === 0 ? (
+              {filteredRows.length === 0 ? (
                 <tr>
-                  <td colSpan={12} className="p-6 text-center text-gray-500">
+                  <td colSpan={10} className="p-6 text-center text-gray-500">
                     No orders found
                   </td>
                 </tr>
               ) : (
-                sortedOrders.map((order) => {
-                  const firstItem = order.items[0];
-                  const groupIds = getGroupItemIds(order.items);
+                filteredRows.map((row) => {
+                  const group = row.group;
+                  const firstItem = row.items[0];
+                  const itemIds = getItemIds(row.items);
+                  const emailHref = row.email ? `/emails/${row.email.id}` : "";
 
                   return (
-                    <tr key={order.key} className="hover:bg-gray-50">
+                    <tr
+                      key={group.id}
+                      className={
+                        group.has_new_activity
+                          ? "bg-yellow-50 hover:bg-yellow-100"
+                          : "hover:bg-blue-50"
+                      }
+                    >
                       <td className="p-3 border">
                         <input
                           type="checkbox"
                           name="ids"
-                          value={groupIds}
+                          value={itemIds}
                           data-bulk-form={bulkFormId}
                         />
                       </td>
 
                       <td className="p-3 border whitespace-nowrap">
-                        {formatDateTime(order.received_at)}
+                        {emailHref ? (
+                          <Link href={emailHref} className="block">
+                            {formatDateTime(group.last_activity_at)}
+                            {group.has_new_activity && (
+                              <div className="text-xs text-yellow-700 font-semibold">
+                                New activity ({group.new_activity_count || 1})
+                              </div>
+                            )}
+                          </Link>
+                        ) : (
+                          formatDateTime(group.last_activity_at)
+                        )}
                       </td>
-
-                      <td className="p-3 border">{order.action}</td>
-                      <td className="p-3 border">{order.customer}</td>
-                      <td className="p-3 border">{order.po_number}</td>
 
                       <td className="p-3 border">
-                        <div className="space-y-1">
-                          {order.items.map((item) => (
-                            <div key={item.id}>{item.sku || ""}</div>
-                          ))}
-                        </div>
+                        {emailHref ? (
+                          <Link href={emailHref} className="block">
+                            New Order
+                          </Link>
+                        ) : (
+                          "New Order"
+                        )}
                       </td>
 
                       <td className="p-3 border">
-                        <div className="space-y-1">
-                          {order.items.map((item) => (
-                            <div key={item.id}>{item.quantity ?? ""}</div>
-                          ))}
-                        </div>
+                        {emailHref ? (
+                          <Link href={emailHref} className="block">
+                            {group.customer_name || firstItem.customer || ""}
+                          </Link>
+                        ) : (
+                          group.customer_name || firstItem.customer || ""
+                        )}
                       </td>
 
-                      <td className="p-3 border">{order.notes}</td>
+                      <td className="p-3 border">
+                        {emailHref ? (
+                          <Link href={emailHref} className="block">
+                            {group.po_number || firstItem.po_number || ""}
+                          </Link>
+                        ) : (
+                          group.po_number || firstItem.po_number || ""
+                        )}
+                      </td>
+
+                      <td className="p-3 border">
+                        {emailHref ? (
+                          <Link href={emailHref} className="block">
+                            <div className="flex flex-col">
+                              <span className="font-semibold text-gray-900">
+                                {row.items.length}{" "}
+                                {row.items.length === 1 ? "Item" : "Items"}
+                              </span>
+                              <span className="text-xs text-gray-500">
+                                Click to view order workspace
+                              </span>
+                            </div>
+                          </Link>
+                        ) : (
+                          <div className="flex flex-col">
+                            <span className="font-semibold text-gray-900">
+                              {row.items.length}{" "}
+                              {row.items.length === 1 ? "Item" : "Items"}
+                            </span>
+                            <span className="text-xs text-gray-500">
+                              Order email missing
+                            </span>
+                          </div>
+                        )}
+                      </td>
 
                       <td className="p-3 border">
                         <div className="flex items-center gap-2">
                           <select
                             name="status"
-                            defaultValue={order.status || "New"}
+                            defaultValue={row.status}
                             className="border rounded px-2 py-1 bg-white"
-                            form={`status-${firstItem.id}`}
+                            form={`status-${group.id}`}
                           >
                             <option value="New">New</option>
                             <option value="Approved">Approved</option>
@@ -549,7 +597,7 @@ export default async function OrdersPage({ searchParams }: OrdersPageProps) {
 
                           <button
                             type="submit"
-                            form={`status-${firstItem.id}`}
+                            form={`status-${group.id}`}
                             className="px-2 py-1 bg-gray-200 rounded hover:bg-gray-300"
                           >
                             Save
@@ -560,18 +608,16 @@ export default async function OrdersPage({ searchParams }: OrdersPageProps) {
                       <td className="p-3 border">
                         <div className="flex flex-col gap-2">
                           <div className="text-xs text-gray-600">
-                            {order.oc_status || "Not Generated"}
+                            {row.ocStatus}
                           </div>
 
-                          <button
-                            type="submit"
-                            form={`generate-oc-${firstItem.id}`}
-                            className="px-4 py-2 rounded-lg text-sm bg-purple-100 text-purple-700 hover:bg-purple-200 text-center"
-                          >
-                            Generate OC
-                          </button>
+                          <GenerateOCButton
+                            ids={itemIds}
+                            sellers={sellers}
+                            buttonClassName="px-4 py-2 rounded-lg text-sm bg-purple-100 text-purple-700 hover:bg-purple-200 text-center disabled:opacity-50"
+                          />
 
-                          {order.oc_document_id ? (
+                          {row.ocDocumentId ? (
                             <Link
                               href={`/orders/${firstItem.id}/oc`}
                               className="px-4 py-2 rounded-lg text-sm bg-yellow-100 text-yellow-700 hover:bg-yellow-200 text-center"
@@ -584,10 +630,11 @@ export default async function OrdersPage({ searchParams }: OrdersPageProps) {
                             </span>
                           )}
 
-                          {order.oc_pdf_url ? (
+                          {row.ocPdfUrl ? (
                             <a
-                              href={order.oc_pdf_url}
+                              href={row.ocPdfUrl}
                               target="_blank"
+                              rel="noreferrer"
                               className="px-4 py-2 rounded-lg text-sm bg-green-100 text-green-700 hover:bg-green-200 text-center"
                             >
                               View OC
@@ -600,31 +647,18 @@ export default async function OrdersPage({ searchParams }: OrdersPageProps) {
                         </div>
                       </td>
 
-                      <td className="p-3 border">{order.original_mail}</td>
+                      <td className="p-3 border">
+                        {row.email?.subject || group.subject || "Original email not linked"}
+                      </td>
 
                       <td className="p-3 border">
-                        <div className="flex flex-col gap-2">
-                          {order.email_id ? (
-                            <Link
-                              href={`/emails/${order.email_id}`}
-                              className="px-4 py-2 rounded-lg text-sm bg-blue-100 text-blue-700 hover:bg-blue-200 text-center"
-                            >
-                              Original Email
-                            </Link>
-                          ) : (
-                            <span className="px-4 py-2 rounded-lg text-sm bg-gray-100 text-gray-400 text-center">
-                              Original Email Missing
-                            </span>
-                          )}
-
-                          <button
-                            type="submit"
-                            form={`delete-${firstItem.id}`}
-                            className="w-full px-4 py-2 rounded-lg text-sm bg-red-100 text-red-700 hover:bg-red-200"
-                          >
-                            Delete
-                          </button>
-                        </div>
+                        <button
+                          type="submit"
+                          form={`delete-${group.id}`}
+                          className="w-full px-4 py-2 rounded-lg text-sm bg-red-100 text-red-700 hover:bg-red-200"
+                        >
+                          Delete
+                        </button>
                       </td>
                     </tr>
                   );
@@ -635,22 +669,22 @@ export default async function OrdersPage({ searchParams }: OrdersPageProps) {
         </div>
       </form>
 
-      {sortedOrders.map((order) => {
-        const firstItem = order.items[0];
-        const groupIds = getGroupItemIds(order.items);
+      {filteredRows.map((row) => {
+        const group = row.group;
+        const itemIds = getItemIds(row.items);
 
         return (
-          <div key={`forms-${firstItem.id}`}>
+          <div key={`forms-${group.id}`}>
             <form
-              id={`status-${firstItem.id}`}
+              id={`status-${group.id}`}
               action="/api/orders/update-status"
               method="POST"
             >
-              <input type="hidden" name="ids" value={groupIds} />
+              <input type="hidden" name="ids" value={itemIds} />
             </form>
 
             <form
-              id={`delete-${firstItem.id}`}
+              id={`delete-${group.id}`}
               action="/api/bulk/action"
               method="POST"
             >
@@ -658,15 +692,7 @@ export default async function OrdersPage({ searchParams }: OrdersPageProps) {
               <input type="hidden" name="operation" value="delete" />
               <input type="hidden" name="source" value="Place Order" />
               <input type="hidden" name="redirect_to" value="/orders" />
-              <input type="hidden" name="ids" value={groupIds} />
-            </form>
-
-            <form
-              id={`generate-oc-${firstItem.id}`}
-              action="/api/orders/generate-oc"
-              method="POST"
-            >
-              <input type="hidden" name="ids" value={groupIds} />
+              <input type="hidden" name="ids" value={itemIds} />
             </form>
           </div>
         );

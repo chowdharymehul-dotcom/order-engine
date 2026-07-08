@@ -3,8 +3,11 @@ import { SupabaseClient } from "@supabase/supabase-js";
 export type CustomerMatchResult = {
   customer_id: string | null;
   customer_name: string;
+  customer_email?: string | null;
+  customer_website?: string | null;
   customer_match_method: string | null;
   customer_match_confidence: number | null;
+  was_created?: boolean;
 };
 
 type CompanyProfile = {
@@ -14,6 +17,27 @@ type CompanyProfile = {
   website: string | null;
   contact_person: string | null;
   is_active: boolean | null;
+};
+
+type CustomerAlias = {
+  customer_id: string;
+  alias: string;
+  company_profiles:
+    | {
+        id: string;
+        company_name: string | null;
+        email: string | null;
+        website: string | null;
+        is_active: boolean | null;
+      }[]
+    | {
+        id: string;
+        company_name: string | null;
+        email: string | null;
+        website: string | null;
+        is_active: boolean | null;
+      }
+    | null;
 };
 
 function cleanText(value: string | null | undefined) {
@@ -60,6 +84,53 @@ function getWebsiteDomain(website: string | null | undefined) {
     .trim();
 }
 
+function websiteFromDomain(domain: string | null | undefined) {
+  const cleanDomain = normalize(domain).replace(/^www\./, "").trim();
+
+  if (!cleanDomain || !cleanDomain.includes(".")) return null;
+
+  return cleanDomain;
+}
+
+function nameFromEmail(value: string | null | undefined) {
+  const email = extractEmailAddress(value);
+
+  if (!email) return "";
+
+  const localPart = email.split("@")[0] || "";
+
+  return cleanText(
+    localPart
+      .replace(/[._-]+/g, " ")
+      .replace(/\d+/g, " ")
+      .replace(/\s+/g, " ")
+  );
+}
+
+function nameFromDomain(value: string | null | undefined) {
+  const domain = getEmailDomain(value);
+
+  if (!domain) return "";
+
+  const firstPart = domain.split(".")[0] || "";
+
+  return cleanText(
+    firstPart
+      .replace(/[._-]+/g, " ")
+      .replace(/\d+/g, " ")
+      .replace(/\s+/g, " ")
+  );
+}
+
+function titleCase(value: string | null | undefined) {
+  return cleanText(value)
+    .toLowerCase()
+    .split(" ")
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
+}
+
 function cleanCompanyName(value: string | null | undefined) {
   return normalize(value)
     .replace(
@@ -71,93 +142,299 @@ function cleanCompanyName(value: string | null | undefined) {
     .trim();
 }
 
-export async function findCustomerForEmail(params: {
+function companyFromAliasRow(row: CustomerAlias) {
+  const rawCompany = row.company_profiles;
+
+  if (Array.isArray(rawCompany)) return rawCompany[0] || null;
+
+  return rawCompany || null;
+}
+
+function resultFromCompany(
+  company: CompanyProfile | NonNullable<ReturnType<typeof companyFromAliasRow>>,
+  method: string,
+  confidence: number,
+  wasCreated = false
+): CustomerMatchResult {
+  return {
+    customer_id: company.id,
+    customer_name: cleanText(company.company_name),
+    customer_email: cleanText(company.email) || null,
+    customer_website: cleanText(company.website) || null,
+    customer_match_method: method,
+    customer_match_confidence: confidence,
+    was_created: wasCreated,
+  };
+}
+
+function fallbackResult(extractedCustomerName?: string | null): CustomerMatchResult {
+  return {
+    customer_id: null,
+    customer_name: cleanText(extractedCustomerName),
+    customer_email: null,
+    customer_website: null,
+    customer_match_method: null,
+    customer_match_confidence: null,
+    was_created: false,
+  };
+}
+
+function chooseCustomerName(params: {
+  extractedCustomerName?: string | null;
+  fromEmail?: string | null;
+}) {
+  const extracted = cleanText(params.extractedCustomerName);
+
+  if (extracted && !extracted.includes("@")) return extracted;
+
+  const domainName = nameFromDomain(params.fromEmail);
+  if (domainName) return titleCase(domainName);
+
+  const emailName = nameFromEmail(params.fromEmail);
+  if (emailName) return titleCase(emailName);
+
+  const email = extractEmailAddress(params.fromEmail);
+  if (email) return email;
+
+  return "";
+}
+
+async function loadCompanyProfiles(supabase: SupabaseClient) {
+  const { data, error } = await supabase
+    .from("company_profiles")
+    .select("id,company_name,email,website,contact_person,is_active")
+    .eq("is_active", true);
+
+  if (error) {
+    throw new Error(`Failed to load customer profiles: ${error.message}`);
+  }
+
+  return (data || []) as CompanyProfile[];
+}
+
+async function findExistingCustomer(params: {
   supabase: SupabaseClient;
-  fromEmail: string | null;
+  fromEmail?: string | null;
+  extractedCustomerName?: string | null;
+}): Promise<CustomerMatchResult> {
+  const { supabase, fromEmail, extractedCustomerName } = params;
+
+  const senderEmail = extractEmailAddress(fromEmail);
+  const senderDomain = getEmailDomain(fromEmail);
+  const extractedName = cleanCompanyName(extractedCustomerName);
+
+  const customers = await loadCompanyProfiles(supabase);
+
+  if (senderEmail) {
+    const match = customers.find(
+      (customer) => extractEmailAddress(customer.email) === senderEmail
+    );
+
+    if (match) return resultFromCompany(match, "exact_email", 100);
+  }
+
+  if (senderDomain) {
+    const match = customers.find((customer) => {
+      return (
+        getEmailDomain(customer.email) === senderDomain ||
+        getWebsiteDomain(customer.website) === senderDomain
+      );
+    });
+
+    if (match) return resultFromCompany(match, "domain", 95);
+  }
+
+  if (extractedName) {
+    const { data: aliases, error: aliasError } = await supabase
+      .from("customer_aliases")
+      .select(`
+        customer_id,
+        alias,
+        company_profiles (
+          id,
+          company_name,
+          email,
+          website,
+          is_active
+        )
+      `);
+
+    if (aliasError) {
+      throw new Error(`Failed to load customer aliases: ${aliasError.message}`);
+    }
+
+    const aliasRows = (aliases || []) as CustomerAlias[];
+
+    const aliasMatch = aliasRows.find((row) => {
+      const alias = cleanCompanyName(row.alias);
+
+      if (!alias) return false;
+
+      return (
+        alias === extractedName ||
+        alias.includes(extractedName) ||
+        extractedName.includes(alias)
+      );
+    });
+
+    const company = aliasMatch ? companyFromAliasRow(aliasMatch) : null;
+
+    if (company) return resultFromCompany(company, "alias", 92);
+  }
+
+  if (extractedName) {
+    const match = customers.find((customer) => {
+      const company = cleanCompanyName(customer.company_name);
+
+      if (!company) return false;
+
+      return (
+        company === extractedName ||
+        company.includes(extractedName) ||
+        extractedName.includes(company)
+      );
+    });
+
+    if (match) return resultFromCompany(match, "company_name", 80);
+  }
+
+  return fallbackResult(extractedCustomerName);
+}
+
+async function createCustomer(params: {
+  supabase: SupabaseClient;
+  fromEmail?: string | null;
   extractedCustomerName?: string | null;
 }) {
   const { supabase, fromEmail, extractedCustomerName } = params;
 
   const senderEmail = extractEmailAddress(fromEmail);
   const senderDomain = getEmailDomain(fromEmail);
-  const extractedName = cleanCompanyName(extractedCustomerName || "");
+  const companyName = chooseCustomerName({
+    extractedCustomerName,
+    fromEmail,
+  });
 
-  const fallback: CustomerMatchResult = {
-    customer_id: null,
-    customer_name: cleanText(extractedCustomerName || ""),
-    customer_match_method: null,
-    customer_match_confidence: null,
+  if (!companyName) return fallbackResult(extractedCustomerName);
+
+  const website = websiteFromDomain(senderDomain);
+
+  const insertPayload: Record<string, any> = {
+    company_name: companyName,
+    email: senderEmail || null,
+    website,
+    is_active: true,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
   };
 
-  const { data, error } = await supabase
+  const { data: createdCustomer, error: createError } = await supabase
     .from("company_profiles")
-    .select("id, company_name, email, website, contact_person, is_active");
+    .insert(insertPayload)
+    .select("id,company_name,email,website,contact_person,is_active")
+    .single();
 
-  if (error || !data) {
-    return fallback;
+  if (createError) {
+    throw new Error(`Failed to auto-create customer: ${createError.message}`);
   }
 
-  const customers = (data as CompanyProfile[]).filter(
-    (customer) => customer.is_active !== false
+  const extractedName = cleanText(extractedCustomerName);
+
+  if (createdCustomer?.id && extractedName) {
+    await supabase.from("customer_aliases").insert({
+      customer_id: createdCustomer.id,
+      alias: extractedName,
+      created_at: new Date().toISOString(),
+    });
+  }
+
+  return resultFromCompany(
+    createdCustomer as CompanyProfile,
+    "auto_created",
+    60,
+    true
   );
-
-  if (senderEmail) {
-    const exactEmailMatch = customers.find(
-      (customer) => extractEmailAddress(customer.email) === senderEmail
-    );
-
-    if (exactEmailMatch) {
-      return {
-        customer_id: exactEmailMatch.id,
-        customer_name: cleanText(exactEmailMatch.company_name || ""),
-        customer_match_method: "exact_email",
-        customer_match_confidence: 100,
-      };
-    }
-  }
-
-  if (senderDomain) {
-    const domainMatch = customers.find((customer) => {
-      const customerEmailDomain = getEmailDomain(customer.email);
-      const customerWebsiteDomain = getWebsiteDomain(customer.website);
-
-      return (
-        customerEmailDomain === senderDomain ||
-        customerWebsiteDomain === senderDomain
-      );
-    });
-
-    if (domainMatch) {
-      return {
-        customer_id: domainMatch.id,
-        customer_name: cleanText(domainMatch.company_name || ""),
-        customer_match_method: "domain",
-        customer_match_confidence: 90,
-      };
-    }
-  }
-
-  if (extractedName) {
-    const companyNameMatch = customers.find((customer) => {
-      const customerName = cleanCompanyName(customer.company_name);
-
-      if (!customerName) return false;
-
-      return (
-        customerName.includes(extractedName) ||
-        extractedName.includes(customerName)
-      );
-    });
-
-    if (companyNameMatch) {
-      return {
-        customer_id: companyNameMatch.id,
-        customer_name: cleanText(companyNameMatch.company_name || ""),
-        customer_match_method: "company_name",
-        customer_match_confidence: 70,
-      };
-    }
-  }
-
-  return fallback;
 }
+
+export async function findCustomerForEmail(params: {
+  supabase: SupabaseClient;
+  fromEmail: string | null;
+  extractedCustomerName?: string | null;
+}) {
+  return findExistingCustomer(params);
+}
+
+export async function getOrCreateCustomer(params: {
+  supabase: SupabaseClient;
+  fromEmail?: string | null;
+  extractedCustomerName?: string | null;
+  allowCreate?: boolean;
+}) {
+  const { supabase, fromEmail, extractedCustomerName, allowCreate = true } = params;
+
+  const existingCustomer = await findExistingCustomer({
+    supabase,
+    fromEmail,
+    extractedCustomerName,
+  });
+
+  if (existingCustomer.customer_id || !allowCreate) {
+    return existingCustomer;
+  }
+
+  return createCustomer({
+    supabase,
+    fromEmail,
+    extractedCustomerName,
+  });
+}
+
+export async function ensureOrderCustomer(params: {
+  supabase: SupabaseClient;
+  orderItemId: string;
+  fromEmail?: string | null;
+  extractedCustomerName?: string | null;
+}) {
+  const { supabase, orderItemId, fromEmail, extractedCustomerName } = params;
+
+  const customerMatch = await getOrCreateCustomer({
+    supabase,
+    fromEmail,
+    extractedCustomerName,
+    allowCreate: true,
+  });
+
+  if (!customerMatch.customer_id) return customerMatch;
+
+  const { data: order } = await supabase
+    .from("order_items")
+    .select("id, order_group_id")
+    .eq("id", orderItemId)
+    .maybeSingle();
+
+  await supabase
+    .from("order_items")
+    .update({
+      customer_id: customerMatch.customer_id,
+      customer: customerMatch.customer_name,
+      customer_match_method: customerMatch.customer_match_method,
+      customer_match_confidence: customerMatch.customer_match_confidence,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", orderItemId);
+
+  if (order?.order_group_id) {
+    await supabase
+      .from("order_groups")
+      .update({
+        customer_id: customerMatch.customer_id,
+        customer_name: customerMatch.customer_name,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", order.order_group_id);
+  }
+
+  return customerMatch;
+}
+
+ 

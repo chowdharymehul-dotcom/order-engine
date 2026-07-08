@@ -360,14 +360,7 @@ export default async function OCTemplatePreviewPage({
         </div>
 
         <div className="flex gap-3">
-          <Link
-            href={`/oc-templates/${id}/ai-review${
-              draftId ? `?draft=${draftId}` : ""
-            }`}
-            className="px-4 py-2 rounded-lg border hover:bg-gray-100"
-          >
-            Back to Review
-          </Link>
+          
 
           <Link
             href="/oc-templates"

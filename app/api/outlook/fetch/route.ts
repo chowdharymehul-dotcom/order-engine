@@ -189,11 +189,26 @@ export async function GET() {
     process.env.SUPABASE_SERVICE_ROLE_KEY!
   );
 
+const { data: activeConnection } = await supabaseAdmin
+  .from("inbox_connections")
+  .select("account_email")
+  .eq("provider", "outlook")
+  .eq("connection_status", "active")
+  .order("created_at", { ascending: false })
+  .limit(1)
+  .maybeSingle();
+
+const connectedEmail = String(
+  activeConnection?.account_email || ""
+)
+  .trim()
+  .toLowerCase();
+
   try {
     const { accessToken, refreshed } = await getValidOutlookAccessToken();
 
     const listRes = await fetch(
-      "https://graph.microsoft.com/v1.0/me/messages?$top=50&$select=id,conversationId,subject,from,receivedDateTime,bodyPreview,body,hasAttachments",
+ "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$top=50&$select=id,conversationId,subject,from,receivedDateTime,bodyPreview,body,hasAttachments",
       {
         headers: {
           Authorization: `Bearer ${accessToken}`,
@@ -229,6 +244,20 @@ export async function GET() {
         msg.from?.emailAddress?.address ||
         msg.from?.emailAddress?.name ||
         "";
+if (
+  connectedEmail &&
+  from.toLowerCase().includes(connectedEmail)
+) {
+  results.push({
+    messageId,
+    subject,
+    from,
+    skipped: true,
+    reason: "own_sent_email",
+  });
+
+  continue;
+}
       const bodyText = stripHtml(msg.body?.content || msg.bodyPreview || "");
 
       const { data: existing } = await supabaseAdmin
@@ -316,6 +345,7 @@ export async function GET() {
 
       const { error: insertError } = await supabaseAdmin.from("emails").insert({
         provider: "outlook",
+direction: "INBOUND",
         external_message_id: messageId,
         gmail_message_id: messageId,
         external_thread_id: threadId,

@@ -18,6 +18,10 @@ type OcrResult = {
   ocrTextLength?: number | null;
 };
 
+function clean(value: any) {
+  return String(value || "").trim();
+}
+
 function getErrorMessage(error: unknown) {
   if (error instanceof Error) return error.message;
   if (typeof error === "string") return error;
@@ -76,6 +80,23 @@ function getAsciiPreview(buffer: Buffer, length = 120) {
 
 function getHexPreview(buffer: Buffer, length = 24) {
   return buffer.subarray(0, length).toString("hex");
+}
+
+
+async function markOutboundIgnored(params: {
+  supabase: any;
+  emailId: string;
+}) {
+  const { supabase, emailId } = params;
+
+  await supabase
+    .from("emails")
+    .update({
+      processing_status: "ignored",
+      last_processing_error: "Outbound/sent email permanently ignored before OCR",
+      processed_at: new Date().toISOString(),
+    })
+    .eq("id", emailId);
 }
 
 async function extractTextFromImageWithOpenAI(params: {
@@ -242,6 +263,7 @@ export async function GET(req: NextRequest) {
     const emailId = req.nextUrl.searchParams.get("emailId");
     const force = req.nextUrl.searchParams.get("force") === "true";
 
+
     let query = supabase
       .from("emails")
       .select("*")
@@ -266,7 +288,20 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    const emails = (rows || []).filter((email: any) => {
+const outboundRows = (rows || []).filter(
+  (email: any) => email.direction === "OUTBOUND"
+);
+
+    for (const email of outboundRows) {
+      await markOutboundIgnored({
+        supabase,
+        emailId: email.id,
+      });
+    }
+
+const emails = (rows || []).filter((email: any) => {
+  if (email.direction === "OUTBOUND") return false;
+
       const hasText = !!String(email.attachment_text || "").trim();
       const attempts = Number(email.ocr_attempts || 0);
       const status = email.processing_status || "";
@@ -284,6 +319,7 @@ export async function GET(req: NextRequest) {
         ok: true,
         message: "No OCR-ready attachments found",
         checkedRows: rows?.length || 0,
+        outboundIgnored: outboundRows.length,
         hint:
           "If testing one email, use /api/process-ocr?emailId=EMAIL_UUID&force=true",
       });
@@ -465,6 +501,7 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json({
       ok: true,
+      outboundIgnored: outboundRows.length,
       processed: results.length,
       results,
     });

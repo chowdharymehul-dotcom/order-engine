@@ -8,7 +8,8 @@ export async function GET() {
     redirect_uri: process.env.GOOGLE_REDIRECT_URI!,
     response_type: "code",
     access_type: "offline",
-    prompt: "consent",
+    prompt: "consent select_account",
+    include_granted_scopes: "false",
     scope: [
       "openid",
       "email",
@@ -18,7 +19,7 @@ export async function GET() {
     ].join(" "),
   });
 
-  const url = `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
-
-  return NextResponse.redirect(url);
+  return NextResponse.redirect(
+    `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`
+  );
 }

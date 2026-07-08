@@ -432,6 +432,7 @@ export default function OCTemplateVisualEditor({
   const [saveMessage, setSaveMessage] = useState("");
   const [zoom, setZoom] = useState(fullScreen ? 1.25 : 1);
   const [nudgeStep, setNudgeStep] = useState(2);
+const [livePdfUrl, setLivePdfUrl] = useState(generatedPdfUrl);
 
   const selectedCurrentItem = useMemo(() => {
     if (!selected) return null;
@@ -752,46 +753,42 @@ export default function OCTemplateVisualEditor({
   }
 
   async function saveAndRegeneratePreview() {
-    setIsRegenerating(true);
-    setSaveMessage("Saving layout...");
+  setIsRegenerating(true);
+  setSaveMessage("Saving layout...");
 
-    const saved = await saveDraftAnalysis("Layout saved");
+  const saved = await saveDraftAnalysis("Layout saved");
 
-    if (!saved) {
-      setIsRegenerating(false);
-      return;
-    }
-
-    setSaveMessage("Generating actual PDF...");
-
-    const generateFormData = new FormData();
-    generateFormData.append("template_id", templateId);
-    generateFormData.append("draft_id", draftId);
-    generateFormData.append("seller_profile_id", sellerProfileId);
-
-    const generateResponse = await fetch("/api/oc-templates/generate-sample-oc", {
-      method: "POST",
-      body: generateFormData,
-      redirect: "follow",
-    });
-
+  if (!saved) {
     setIsRegenerating(false);
-
-    if (!generateResponse.ok && !generateResponse.redirected) {
-      setSaveMessage("Generate failed");
-      return;
-    }
-
-    const currentUrl = new URL(window.location.href);
-    currentUrl.searchParams.set("draft", draftId);
-
-    if (sellerProfileId) {
-      currentUrl.searchParams.set("seller_id", sellerProfileId);
-    }
-
-    currentUrl.searchParams.set("r", String(Date.now()));
-    window.location.href = currentUrl.toString();
+    return;
   }
+
+  setSaveMessage("Generating actual PDF...");
+
+  const generateFormData = new FormData();
+  generateFormData.append("template_id", templateId);
+  generateFormData.append("draft_id", draftId);
+  generateFormData.append("seller_profile_id", sellerProfileId);
+  generateFormData.append("return_json", "1");
+
+  const generateResponse = await fetch("/api/oc-templates/generate-sample-oc", {
+    method: "POST",
+    body: generateFormData,
+  });
+
+  const result = await generateResponse.json();
+
+  setIsRegenerating(false);
+
+  if (!generateResponse.ok || !result?.ok || !result?.pdf_url) {
+    setSaveMessage("Generate failed");
+    return;
+  }
+
+  setLivePdfUrl(`${result.pdf_url}?t=${Date.now()}`);
+  setSaveMessage("PDF updated");
+}
+   
 
   function undoLastChange() {
     const previous = history[history.length - 1];
@@ -998,7 +995,21 @@ export default function OCTemplateVisualEditor({
         source_type: "manual",
         confidence: 1,
       },
-    };
+static_blocks: {
+  display_label: "Fixed Text",
+  block_key: `fixed_text_${items.length + 1}`,
+  content: "Fixed Text",
+  page_number: 1,
+  x_position: defaultX,
+  y_position: defaultY,
+  width: safePageWidth * 0.25,
+  height: safePageHeight * 0.03,
+  font_size: 10,
+  font_color: "#111827",
+  background_fill: "",
+  confidence: 1,
+},
+};
 
     const itemWithPercents = convertValuesToPercents(defaults[section] || {});
 
@@ -1151,7 +1162,7 @@ export default function OCTemplateVisualEditor({
             nudgeSelected={nudgeSelected}
             nudgeStep={nudgeStep}
             setNudgeStep={setNudgeStep}
-            generatedPdfUrl={generatedPdfUrl}
+            generatedPdfUrl={livePdfUrl}
           />
         </div>
       </div>
@@ -1198,7 +1209,7 @@ export default function OCTemplateVisualEditor({
         nudgeSelected={nudgeSelected}
         nudgeStep={nudgeStep}
         setNudgeStep={setNudgeStep}
-        generatedPdfUrl={generatedPdfUrl}
+        generatedPdfUrl={livePdfUrl}
       />
     </div>
   );
@@ -1227,6 +1238,10 @@ function EditorHeader({
 
         <div className="flex flex-wrap gap-2">
           <SmallButton label="+ Field" onClick={() => addItem("fields")} />
+<SmallButton
+  label="+ Fixed Text"
+  onClick={() => addItem("static_blocks")}
+/>
           <SmallButton label="+ Column" onClick={() => addItem("columns")} />
           <SmallButton label="+ Line" onClick={() => addItem("lines")} />
           <SmallButton label="+ Box" onClick={() => addItem("rectangles")} />
@@ -1290,6 +1305,10 @@ function EditorSidePanel({
 
       <div className="grid grid-cols-2 gap-2">
         <SmallButton label="+ Field" onClick={() => addItem("fields")} />
+<SmallButton
+  label="+ Fixed Text"
+  onClick={() => addItem("static_blocks")}
+/>
         <SmallButton label="+ Column" onClick={() => addItem("columns")} />
         <SmallButton label="+ Line" onClick={() => addItem("lines")} />
         <SmallButton label="+ Box" onClick={() => addItem("rectangles")} />
@@ -1387,6 +1406,13 @@ function EditorSidePanel({
                   value={valueAt(selectedCurrentItem, "preview_text")}
                   onChange={(value) => updateSelected("preview_text", value)}
                 />
+{selected.section === "static_blocks" && (
+  <EditorInput
+    label="Fixed Text Content"
+    value={valueAt(selectedCurrentItem, "content")}
+    onChange={(value) => updateSelected("content", value)}
+  />
+)}
 
                 <label className="block text-sm text-gray-600">
                   Mapped To

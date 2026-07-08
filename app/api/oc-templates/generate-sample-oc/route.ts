@@ -53,6 +53,11 @@ function value(formData: FormData, key: string) {
   return String(formData.get(key) || "").trim();
 }
 
+function boolValue(formData: FormData, key: string) {
+  const raw = value(formData, key).toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes";
+}
+
 function safeFileName(name: string) {
   return name
     .replace(/[^a-zA-Z0-9._-]/g, "_")
@@ -61,7 +66,7 @@ function safeFileName(name: string) {
 }
 
 async function fetchArrayBuffer(url: string) {
-  const response = await fetch(url);
+  const response = await fetch(url, { cache: "no-store" });
 
   if (!response.ok) {
     throw new Error(`Failed to download template PDF: ${response.status}`);
@@ -77,6 +82,7 @@ export async function POST(req: Request) {
     const templateId = value(formData, "template_id");
     const draftId = value(formData, "draft_id");
     const sellerProfileId = value(formData, "seller_profile_id");
+    const returnJson = boolValue(formData, "return_json");
 
     if (!templateId || !draftId) {
       return NextResponse.json(
@@ -313,8 +319,19 @@ export async function POST(req: Request) {
       );
     }
 
+    if (returnJson) {
+      return NextResponse.json({
+        ok: true,
+        pdf_url: pdfUrl,
+        storage_path: storagePath,
+      });
+    }
+
     return NextResponse.redirect(
-      new URL(`/oc-templates/${templateId}/preview?draft=${draftId}`, req.url),
+      new URL(
+        `/oc-templates/${templateId}/preview?draft=${draftId}`,
+        req.url
+      ),
       { status: 303 }
     );
   } catch (error: any) {

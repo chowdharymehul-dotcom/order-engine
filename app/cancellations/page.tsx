@@ -18,6 +18,7 @@ type CancellationItem = {
   action: string | null;
   external_message_id: string | null;
   gmail_message_id: string | null;
+  parent_email_id: string | null;
 };
 
 type EmailRow = {
@@ -90,11 +91,32 @@ function getGroupItemIds(items: CancellationItem[]) {
 
 function getMessageKey(item: CancellationItem) {
   return (
+    clean(item.parent_email_id) ||
     clean(item.external_message_id) ||
     clean(item.gmail_message_id) ||
     clean(item.email_subject) ||
     clean(item.id)
   );
+}
+
+function findEmailForItem(params: {
+  item: CancellationItem;
+  emailByMessageId: Map<string, EmailRow>;
+}) {
+  const { item, emailByMessageId } = params;
+
+  const externalMessageId = clean(item.external_message_id);
+  const gmailMessageId = clean(item.gmail_message_id);
+
+  if (externalMessageId && emailByMessageId.has(externalMessageId)) {
+    return emailByMessageId.get(externalMessageId) || null;
+  }
+
+  if (gmailMessageId && emailByMessageId.has(gmailMessageId)) {
+    return emailByMessageId.get(gmailMessageId) || null;
+  }
+
+  return null;
 }
 
 export default async function CancellationsPage({
@@ -112,7 +134,7 @@ export default async function CancellationsPage({
   const { data, error } = await supabase
     .from("order_items")
     .select(
-      "id, customer, po_number, sku, quantity, notes, status, email_subject, action, external_message_id, gmail_message_id"
+      "id, customer, po_number, sku, quantity, notes, status, email_subject, action, external_message_id, gmail_message_id, parent_email_id"
     )
     .is("deleted_at", null)
     .eq("action", "Cancel Order")
@@ -147,7 +169,7 @@ export default async function CancellationsPage({
     )
   );
 
-  const emailMap = new Map<string, EmailRow>();
+  const emailByMessageId = new Map<string, EmailRow>();
 
   if (externalIds.length > 0) {
     const { data: emailRows } = await supabase
@@ -157,7 +179,7 @@ export default async function CancellationsPage({
 
     for (const email of (emailRows ?? []) as EmailRow[]) {
       if (email.external_message_id) {
-        emailMap.set(email.external_message_id, email);
+        emailByMessageId.set(email.external_message_id, email);
       }
     }
   }
@@ -170,7 +192,7 @@ export default async function CancellationsPage({
 
     for (const email of (gmailEmailRows ?? []) as EmailRow[]) {
       if (email.gmail_message_id) {
-        emailMap.set(email.gmail_message_id, email);
+        emailByMessageId.set(email.gmail_message_id, email);
       }
     }
   }
@@ -192,9 +214,10 @@ export default async function CancellationsPage({
   ).map(([key, groupItems]) => {
     const first = groupItems[0];
 
-    const email =
-      emailMap.get(first.external_message_id || "") ||
-      emailMap.get(first.gmail_message_id || "");
+    const email = findEmailForItem({
+      item: first,
+      emailByMessageId,
+    });
 
     return {
       key,
@@ -334,8 +357,7 @@ export default async function CancellationsPage({
                 <th className="p-3 border text-left">Received On</th>
                 <th className="p-3 border text-left">Customer</th>
                 <th className="p-3 border text-left">PO Number</th>
-                <th className="p-3 border text-left">SKU</th>
-                <th className="p-3 border text-left">Qty</th>
+                <th className="p-3 border text-left">Items</th>
                 <th className="p-3 border text-left">Notes</th>
                 <th className="p-3 border text-left">Action</th>
                 <th className="p-3 border text-left">Status</th>
@@ -345,7 +367,7 @@ export default async function CancellationsPage({
             <tbody>
               {sortedRows.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="p-6 text-center text-gray-500">
+                  <td colSpan={8} className="p-6 text-center text-gray-500">
                     No cancellations found
                   </td>
                 </tr>
@@ -353,6 +375,13 @@ export default async function CancellationsPage({
                 sortedRows.map((row) => {
                   const firstItem = row.items[0];
                   const groupIds = getGroupItemIds(row.items);
+
+                  const parentEmailId =
+                    firstItem.parent_email_id || row.email_id || "";
+
+                  const rowHref = parentEmailId
+                    ? `/emails/${parentEmailId}`
+                    : "";
 
                   return (
                     <tr key={row.key} className="hover:bg-gray-50">
@@ -366,27 +395,49 @@ export default async function CancellationsPage({
                       </td>
 
                       <td className="p-3 border whitespace-nowrap">
-                        {formatDateTime(row.received_at)}
-                      </td>
-
-                      <td className="p-3 border">{row.customer}</td>
-
-                      <td className="p-3 border">{row.po_number}</td>
-
-                      <td className="p-3 border">
-                        <div className="space-y-1">
-                          {row.items.map((item) => (
-                            <div key={item.id}>{item.sku || ""}</div>
-                          ))}
-                        </div>
+                        {rowHref ? (
+                          <Link href={rowHref} className="block">
+                            {formatDateTime(row.received_at)}
+                          </Link>
+                        ) : (
+                          formatDateTime(row.received_at)
+                        )}
                       </td>
 
                       <td className="p-3 border">
-                        <div className="space-y-1">
-                          {row.items.map((item) => (
-                            <div key={item.id}>{item.quantity ?? ""}</div>
-                          ))}
-                        </div>
+                        {rowHref ? (
+                          <Link href={rowHref} className="block">
+                            {row.customer}
+                          </Link>
+                        ) : (
+                          row.customer
+                        )}
+                      </td>
+
+                      <td className="p-3 border">
+                        {rowHref ? (
+                          <Link href={rowHref} className="block">
+                            {row.po_number}
+                          </Link>
+                        ) : (
+                          row.po_number
+                        )}
+                      </td>
+
+                      <td className="p-3 border">
+                        {rowHref ? (
+                          <Link href={rowHref} className="block">
+                            <div className="font-semibold text-gray-900">
+                              {row.items.length}{" "}
+                              {row.items.length === 1 ? "Item" : "Items"}
+                            </div>
+                          </Link>
+                        ) : (
+                          <div className="font-semibold text-gray-900">
+                            {row.items.length}{" "}
+                            {row.items.length === 1 ? "Item" : "Items"}
+                          </div>
+                        )}
                       </td>
 
                       <td className="p-3 border">{row.notes}</td>
@@ -400,16 +451,16 @@ export default async function CancellationsPage({
                             Reply
                           </Link>
 
-                          {row.email_id ? (
+                          {rowHref ? (
                             <Link
-                              href={`/emails/${row.email_id}`}
+                              href={rowHref}
                               className="px-4 py-2 rounded-lg text-sm bg-blue-100 text-blue-700 hover:bg-blue-200 text-center"
                             >
                               Original Email
                             </Link>
                           ) : (
                             <span className="px-4 py-2 rounded-lg text-sm bg-gray-100 text-gray-400 text-center">
-                              Original Email
+                              Original Email Missing
                             </span>
                           )}
 

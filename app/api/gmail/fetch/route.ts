@@ -219,6 +219,18 @@ export async function GET() {
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!
   );
+const { data: activeConnection } = await supabaseAdmin
+  .from("inbox_connections")
+  .select("account_email")
+  .eq("provider", "gmail")
+  .eq("connection_status", "active")
+  .order("created_at", { ascending: false })
+  .limit(1)
+  .maybeSingle();
+
+const connectedEmail = String(activeConnection?.account_email || "")
+  .trim()
+  .toLowerCase();
 
   try {
     const { data: connection, error: connectionError } = await supabaseAdmin
@@ -258,7 +270,7 @@ export async function GET() {
     const listRes = await gmail.users.messages.list({
       userId: "me",
       maxResults: 50,
-      q: "newer_than:2d -category:promotions -category:social",
+      q: "in:inbox newer_than:2d -in:sent -in:drafts -category:promotions -category:social",
     });
 
     const messages = listRes.data.messages || [];
@@ -361,6 +373,17 @@ export async function GET() {
         headers.find((h: any) => h.name === "Subject")?.value || "";
       const from =
         headers.find((h: any) => h.name === "From")?.value || "";
+if (connectedEmail && from.toLowerCase().includes(connectedEmail)) {
+  results.push({
+    messageId,
+    subject,
+    from,
+    skipped: true,
+    reason: "own_sent_email",
+  });
+
+  continue;
+}
       const dateHeader =
         headers.find((h: any) => h.name === "Date")?.value || "";
 
@@ -411,6 +434,7 @@ export async function GET() {
 
       const { error: insertError } = await supabaseAdmin.from("emails").insert({
         provider: "gmail",
+direction: "INBOUND",
         gmail_message_id: messageId,
         external_message_id: messageId,
         external_thread_id: threadId,
