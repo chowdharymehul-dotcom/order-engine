@@ -1,13 +1,15 @@
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
+export const maxDuration = 300;
 
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import OpenAI from "openai";
-import { extractTextFromPdfWithCloudConvert } from "@/lib/cloudconvert-ocr";
 import { getAppBaseUrl } from "@/lib/ocr";
 
 const MAX_OCR_ATTEMPTS = 5;
+const MIN_USEFUL_TEXT_LENGTH = 20;
+const MAX_SCANNED_PDF_PAGES = 3;
+const OCR_SCALE = 2;
 
 type OcrResult = {
   text: string;
@@ -18,8 +20,13 @@ type OcrResult = {
   ocrTextLength?: number | null;
 };
 
-function clean(value: any) {
-  return String(value || "").trim();
+function cleanOcrText(value: any) {
+  return String(value || "")
+    .replace(/\u0000/g, "")
+    .replace(/\r/g, "")
+    .replace(/\s+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 function getErrorMessage(error: unknown) {
@@ -82,6 +89,21 @@ function getHexPreview(buffer: Buffer, length = 24) {
   return buffer.subarray(0, length).toString("hex");
 }
 
+async function runtimeImport(moduleName: string) {
+  const importer = new Function("moduleName", "return import(moduleName)");
+  return importer(moduleName);
+}
+
+async function getRecognize() {
+  const tesseract = await runtimeImport("tesseract.js");
+  const recognize = tesseract.recognize || tesseract.default?.recognize;
+
+  if (!recognize) {
+    throw new Error("Tesseract recognize function not found");
+  }
+
+  return recognize;
+}
 
 async function markOutboundIgnored(params: {
   supabase: any;
@@ -99,66 +121,162 @@ async function markOutboundIgnored(params: {
     .eq("id", emailId);
 }
 
-async function extractTextFromImageWithOpenAI(params: {
-  openai: OpenAI;
-  attachmentUrl: string;
-  filename: string;
+async function renderPdfPageToPng(params: {
+  pdf: any;
+  pageNumber: number;
+  scale?: number;
 }) {
-  const { openai, attachmentUrl, filename } = params;
+  const { pdf, pageNumber, scale = OCR_SCALE } = params;
 
-  const response = await openai.chat.completions.create({
-    model: "gpt-4.1-mini",
-    messages: [
-      {
-        role: "system",
-        content:
-          "You extract readable business text from images. Return only extracted text. Do not add explanations.",
-      },
-      {
-        role: "user",
-        content: [
-          {
-            type: "text",
-            text: `Extract all readable text from this attachment: ${filename}`,
-          },
-          {
-            type: "image_url",
-            image_url: {
-              url: attachmentUrl,
-            },
-          },
-        ],
-      },
-    ],
-  });
+  const canvasModule = await runtimeImport("@napi-rs/canvas");
+  const page = await pdf.getPage(pageNumber);
+  const viewport = page.getViewport({ scale });
 
-  return response.choices[0]?.message?.content?.trim() || "";
+  const canvas = canvasModule.createCanvas(
+    Math.ceil(viewport.width),
+    Math.ceil(viewport.height)
+  );
+
+  const context = canvas.getContext("2d");
+
+  await page.render({
+    canvasContext: context,
+    viewport,
+  }).promise;
+
+  return canvas.toBuffer("image/png");
+}
+
+async function extractScannedPdfWithTesseract(buffer: Buffer) {
+  const pdfjsLib = await runtimeImport("pdfjs-dist/legacy/build/pdf.mjs");
+  const recognize = await getRecognize();
+
+  const pdf = await pdfjsLib.getDocument({
+    data: new Uint8Array(buffer),
+    isEvalSupported: false,
+    useSystemFonts: true,
+  } as any).promise;
+
+  try {
+    const maxPages = Math.min(
+      Number(pdf.numPages || 0),
+      MAX_SCANNED_PDF_PAGES
+    );
+
+    const pageTexts: string[] = [];
+
+    for (let pageNumber = 1; pageNumber <= maxPages; pageNumber += 1) {
+      const imageBuffer = await renderPdfPageToPng({
+        pdf,
+        pageNumber,
+        scale: OCR_SCALE,
+      });
+
+      const result = await recognize(imageBuffer, "eng");
+      const text = cleanOcrText(result?.data?.text || "");
+
+      if (text) pageTexts.push(text);
+    }
+
+    return cleanOcrText(pageTexts.join("\n\n"));
+  } finally {
+    await (pdf as any).destroy?.();
+  }
+}
+
+async function extractTextFromImageWithTesseract(params: {
+  buffer: Buffer;
+}) {
+  const recognize = await getRecognize();
+  const result = await recognize(params.buffer, "eng");
+
+  return cleanOcrText(result?.data?.text || "");
 }
 
 async function extractTextFromAttachment(params: {
-  openai: OpenAI;
   attachmentUrl: string;
   filename: string;
   contentType: string | null;
   buffer: Buffer;
 }) {
-  const { openai, attachmentUrl, filename, contentType, buffer } = params;
+  const { attachmentUrl, filename, contentType, buffer } = params;
+if (looksLikePdf(buffer)) {
+  const pdfjsLib = await runtimeImport(
+    "pdfjs-dist/legacy/build/pdf.mjs"
+  );
 
-  if (looksLikePdf(buffer)) {
-    const result = await extractTextFromPdfWithCloudConvert(
-      buffer,
-      filename || "attachment.pdf"
+  const tesseract = await runtimeImport("tesseract.js");
+  const recognize =
+    tesseract.recognize || tesseract.default?.recognize;
+
+  if (!recognize) {
+    throw new Error("Tesseract recognize function not found");
+  }
+
+  const pdf = await pdfjsLib.getDocument({
+    data: new Uint8Array(buffer),
+    isEvalSupported: false,
+    useSystemFonts: true,
+  } as any).promise;
+
+  try {
+    const pageCount = Math.min(
+      Number(pdf.numPages || 0),
+      MAX_SCANNED_PDF_PAGES
     );
 
+    const pageTexts: string[] = [];
+
+    for (
+      let pageNumber = 1;
+      pageNumber <= pageCount;
+      pageNumber += 1
+    ) {
+      const imageBuffer = await renderPdfPageToPng({
+        pdf,
+        pageNumber,
+        scale: OCR_SCALE,
+      });
+
+      const ocrResult = await recognize(imageBuffer, "eng");
+      const pageText = cleanOcrText(
+        ocrResult?.data?.text || ""
+      );
+
+      if (pageText) {
+        pageTexts.push(pageText);
+      }
+    }
+
+    const scannedText = cleanOcrText(
+      pageTexts.join("\n\n")
+    );
+
+    if (scannedText.length < MIN_USEFUL_TEXT_LENGTH) {
+      throw new Error(
+        JSON.stringify({
+          step: "local_scanned_pdf_ocr",
+          error:
+            "Scanned PDF OCR returned empty/too-short text",
+          filename,
+          ocrTextLength: scannedText.length,
+          ocrPreview: scannedText.slice(0, 300),
+        })
+      );
+    }
+
     return {
-      text: result.text?.trim() || "",
-      method: "cloudconvert_pdf",
-      jobId: result.jobId || null,
-      strategy: result.strategy || null,
-      directTextLength: result.directTextLength || 0,
-      ocrTextLength: result.ocrTextLength || 0,
+      text: scannedText,
+      method: "local_scanned_pdf_tesseract",
+      jobId: `local-scanned-pdf-${Date.now()}`,
+      strategy: "pdfjs_canvas_tesseract",
+      directTextLength: 0,
+      ocrTextLength: scannedText.length,
     } satisfies OcrResult;
+  } finally {
+    await (pdf as any).destroy?.();
   }
+}
 
   if (isTextLike(filename, contentType)) {
     return {
@@ -172,17 +290,13 @@ async function extractTextFromAttachment(params: {
   }
 
   if (isImageLike(filename, contentType)) {
-    const text = await extractTextFromImageWithOpenAI({
-      openai,
-      attachmentUrl,
-      filename,
-    });
+    const text = await extractTextFromImageWithTesseract({ buffer });
 
     return {
       text,
-      method: "openai_image_vision",
+      method: "local_image_tesseract",
       jobId: null,
-      strategy: "image_vision",
+      strategy: "image_tesseract",
       directTextLength: 0,
       ocrTextLength: text.length,
     } satisfies OcrResult;
@@ -197,6 +311,7 @@ async function extractTextFromAttachment(params: {
       downloadedBytes: buffer.length,
       hexPreview: getHexPreview(buffer),
       asciiPreview: getAsciiPreview(buffer),
+      attachmentUrl,
     })
   );
 }
@@ -255,14 +370,9 @@ export async function GET(req: NextRequest) {
     process.env.SUPABASE_SERVICE_ROLE_KEY!
   );
 
-  const openai = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY!,
-  });
-
   try {
     const emailId = req.nextUrl.searchParams.get("emailId");
     const force = req.nextUrl.searchParams.get("force") === "true";
-
 
     let query = supabase
       .from("emails")
@@ -288,9 +398,9 @@ export async function GET(req: NextRequest) {
       );
     }
 
-const outboundRows = (rows || []).filter(
-  (email: any) => email.direction === "OUTBOUND"
-);
+    const outboundRows = (rows || []).filter(
+      (email: any) => email.direction === "OUTBOUND"
+    );
 
     for (const email of outboundRows) {
       await markOutboundIgnored({
@@ -299,8 +409,8 @@ const outboundRows = (rows || []).filter(
       });
     }
 
-const emails = (rows || []).filter((email: any) => {
-  if (email.direction === "OUTBOUND") return false;
+    const emails = (rows || []).filter((email: any) => {
+      if (email.direction === "OUTBOUND") return false;
 
       const hasText = !!String(email.attachment_text || "").trim();
       const attempts = Number(email.ocr_attempts || 0);
@@ -392,7 +502,6 @@ const emails = (rows || []).filter((email: any) => {
           `attachment-${email.id}.pdf`;
 
         const extracted = await extractTextFromAttachment({
-          openai,
           attachmentUrl: email.attachment_url,
           filename,
           contentType,

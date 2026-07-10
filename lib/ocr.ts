@@ -1,23 +1,7 @@
-export type OcrProvider = "cloudconvert";
+export type OcrProvider = "local";
 
 export function getOcrProvider(): OcrProvider {
-  const provider = process.env.OCR_PROVIDER;
-
-  if (provider !== "cloudconvert") {
-    throw new Error("Invalid OCR_PROVIDER. Expected 'cloudconvert'.");
-  }
-
-  return provider;
-}
-
-export function getCloudConvertApiKey(): string {
-  const apiKey = process.env.CLOUDCONVERT_API_KEY;
-
-  if (!apiKey) {
-    throw new Error("Missing CLOUDCONVERT_API_KEY");
-  }
-
-  return apiKey;
+  return "local";
 }
 
 export function getAppBaseUrl(): string {
@@ -31,16 +15,10 @@ export function getAppBaseUrl(): string {
 }
 
 export function assertOcrConfig() {
-  const provider = getOcrProvider();
-
-  if (provider === "cloudconvert") {
-    getCloudConvertApiKey();
-  }
-
   getAppBaseUrl();
 
   return {
-    provider,
+    provider: "local",
     ok: true,
   };
 }

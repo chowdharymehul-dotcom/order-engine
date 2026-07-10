@@ -18,6 +18,12 @@ type ResolveOrderGroupParams = {
   poNumber?: string | null;
   orderReference?: string | null;
   source?: string | null;
+
+  conversationType?:
+    | "ORDER"
+    | "ENQUIRY"
+    | "CANCELLATION"
+    | "GENERAL";
 };
 
 const INVALID_REFERENCES = new Set([
@@ -232,6 +238,8 @@ async function updateGroupActivity(params: {
       customer_name: clean(customerName) || group.customer_name || null,
       po_number: poNumber || group.po_number || null,
       subject: clean(email.subject) || group.subject || null,
+conversation_type:
+  group.conversation_type || "GENERAL",
       updated_at: new Date().toISOString(),
     })
     .eq("id", group.id)
@@ -246,15 +254,16 @@ async function updateGroupActivity(params: {
 }
 
 export async function resolveOrderGroup(params: ResolveOrderGroupParams) {
-  const {
-    supabase,
-    email,
-    customerId = null,
-    customerName = null,
-    poNumber = null,
-    orderReference = null,
-    source = "email",
-  } = params;
+ const {
+  supabase,
+  email,
+  customerId = null,
+  customerName = null,
+  poNumber = null,
+  orderReference = null,
+  source = "email",
+  conversationType = "GENERAL",
+} = params;
 
   const parentEmailId = clean(email.id);
   const externalThreadId = clean(email.external_thread_id);
@@ -402,6 +411,7 @@ export async function resolveOrderGroup(params: ResolveOrderGroupParams) {
       status: "New",
       oc_status: "Not Generated",
       source: source || "email",
+conversation_type: conversationType,
       last_activity_at: activityAt,
       has_new_activity: true,
       new_activity_count: 1,

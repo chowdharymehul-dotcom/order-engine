@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import OpenAI from "openai";
-import CloudConvert from "cloudconvert";
+
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -344,52 +344,10 @@ async function downloadBuffer(url: string) {
   return Buffer.from(arrayBuffer);
 }
 
-async function convertPdfFirstPageToPngUrl(templateUrl: string) {
-  const apiKey = process.env.CLOUDCONVERT_API_KEY;
-
-  if (!apiKey) {
-    throw new Error("Missing CLOUDCONVERT_API_KEY");
-  }
-
-  const cloudConvert = new CloudConvert(apiKey);
-
-  const job = await cloudConvert.jobs.create({
-    tasks: {
-      "import-template-pdf": {
-        operation: "import/url",
-        url: templateUrl,
-      },
-      "convert-first-page-to-png": {
-        operation: "convert",
-        input: "import-template-pdf",
-        input_format: "pdf",
-        output_format: "png",
-        engine: "poppler",
-        pages: "1",
-        pixel_density: 250,
-      },
-      "export-template-image": {
-        operation: "export/url",
-        input: "convert-first-page-to-png",
-        inline: false,
-        archive_multiple_files: false,
-      },
-    },
-  });
-
-  const completedJob = await cloudConvert.jobs.wait(job.id);
-
-  const exportTask = completedJob.tasks?.find(
-    (task: any) => task.name === "export-template-image"
+async function convertPdfFirstPageToPngUrl(templateUrl: string): Promise<string> {
+  throw new Error(
+    "PDF to PNG template analysis is disabled after removing CloudConvert. Upload a PNG/JPG template image instead."
   );
-
-  const fileUrl = exportTask?.result?.files?.[0]?.url;
-
-  if (!fileUrl) {
-    throw new Error("CloudConvert did not return a PNG URL");
-  }
-
-  return fileUrl;
 }
 
 async function uploadPngToSupabase(params: {

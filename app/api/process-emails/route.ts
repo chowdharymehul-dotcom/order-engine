@@ -2,7 +2,6 @@ export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 import { NextRequest, NextResponse } from "next/server";
-import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
 import { getOrCreateCustomer } from "@/lib/customerAutoLink";
 import { resolveOrderGroup } from "@/lib/order-group";
@@ -10,9 +9,6 @@ import { validateOrderCandidate } from "@/lib/order-validator";
 import { validateEnquiryCandidate } from "@/lib/enquiry-validator";
 import { validateCancellationCandidate } from "@/lib/cancellation-validator";
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY!,
-});
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -462,90 +458,394 @@ async function insertStructuredOrder(
 }
 
 async function classifyEmail(text: string) {
-  const prompt = `
-Classify this business email/document into exactly ONE category.
+  const input = clean(text).toUpperCase();
 
-Return only one word:
-ORDER
-ENQUIRY
-CANCELLATION
-IGNORE
+  const cancellationPatterns = [
+    /\bCANCEL(?:LED|LATION)?\b/,
+    /\bDO\s+NOT\s+SHIP\b/,
+    /\bSTOP\s+PRODUCTION\b/,
+    /\bREMOVE\s+THIS\s+ORDER\b/,
+    /\bDELETE\s+THIS\s+ORDER\b/,
+    /\bVOID\s+ORDER\b/,
+    /\bNO\s+LONGER\s+REQUIRED\b/,
+    /\bPLEASE\s+CANCEL\b/,
+  ];
 
-ORDER: real order, purchase order, PO attachment, item rows, quantity, price.
-ENQUIRY: question/status/confirmation/payment/delivery follow-up without new order.
-CANCELLATION: explicit cancel/stop/remove/do not proceed/do not ship.
-IGNORE: spam/marketing/OTP/irrelevant/unclear.
+  for (const pattern of cancellationPatterns) {
+    if (pattern.test(input)) {
+      return "CANCELLATION";
+    }
+  }
 
-Rules:
-- A purchase order PDF with item rows is ORDER.
-- "cancel date" inside a PO is not cancellation.
+  const orderIndicators = [
+    /\bPURCHASE\s+ORDER\b/,
+    /\bPURCHASE\s+ORDER\s*#/,
+    /\bPO\s*#/,
+    /\bPO\s*NO\b/,
+    /\bPO\s*NUMBER\b/,
+    /\bORDER\s+NUMBER\b/,
+    /\bORDER\s+NO\b/,
+    /\bORDER\s+QTY\b/,
+    /\bSHIP\s+DATE\b/,
+    /\bDELIVERY\s+DATE\b/,
+    /\bUNIT\s+PRICE\b/,
+    /\bTOTAL\s+AMOUNT\b/,
+    /\bARTICLE\b/,
+    /\bSTYLE\b/,
+    /\bSKU\b/,
+    /\bITEM\b/,
+    /\bREFERENCE\b/,
+    /\bDESCRIPTION\b/,
+    /\bQUANTITY\b/,
+    /\bPRICE\b/,
+    /\bAMOUNT\b/,
+    /\bCONFIRMACION\s+PEDIDO\b/,
+    /\bBON\s+DE\s+COMMANDE\b/,
+  ];
 
-INPUT:
-${text}
-`;
+  let score = 0;
 
-  const res = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    temperature: 0,
-    messages: [{ role: "user", content: prompt }],
-  });
+  for (const pattern of orderIndicators) {
+    if (pattern.test(input)) {
+      score += 1;
+    }
+  }
 
-  const value = clean(res.choices[0]?.message?.content).toUpperCase();
-  if (value === "ORDER") return "ORDER";
-  if (value === "ENQUIRY") return "ENQUIRY";
-  if (value === "CANCELLATION") return "CANCELLATION";
+  const itemRowPattern =
+    /[A-Z0-9\/\-_]{4,}\s+\d+(?:\.\d+)?\s+\d+(?:\.\d+)?/g;
+
+  const itemRows = input.match(itemRowPattern);
+
+  if (itemRows) {
+    score += itemRows.length;
+  }
+
+  if (score >= 3) {
+    return "ORDER";
+  }
+
+  const enquiryPatterns = [
+    /\bPLEASE\s+ADVISE\b/,
+    /\bCAN\s+YOU\b/,
+    /\bCOULD\s+YOU\b/,
+    /\bMAY\s+WE\b/,
+    /\bWHEN\s+WILL\b/,
+    /\bDELIVERY\s+STATUS\b/,
+    /\bSTATUS\b/,
+    /\bUPDATE\b/,
+    /\bFOLLOW\s*UP\b/,
+    /\bLEAD\s+TIME\b/,
+    /\bETA\b/,
+    /\bQUOTE\b/,
+    /\bQUOTATION\b/,
+    /\bPRICE\s+REQUEST\b/,
+    /\bSAMPLE\s+REQUEST\b/,
+    /\bPLEASE\s+CONFIRM\b/,
+    /\bPLEASE\s+CHECK\b/,
+    /\bANY\s+UPDATE\b/,
+    /\bTRACKING\b/,
+  ];
+
+  for (const pattern of enquiryPatterns) {
+    if (pattern.test(input)) {
+      return "ENQUIRY";
+    }
+  }
+
   return "IGNORE";
 }
 
 async function extractStructured(text: string): Promise<ExtractedData> {
-  const prompt = `
-Extract business data from this email/PDF text.
+  const preserved = keepLines(text);
 
-Return JSON only:
-{
-  "customer": "",
-  "po_number": "",
-  "items": [
-    {
-      "sku": "",
-      "quantity": null,
-      "unit_price": null,
-      "currency": "USD",
-      "line_total": null,
-      "notes": ""
+  const lines = preserved
+    .split("\n")
+    .map((line) => clean(line))
+    .filter(Boolean);
+
+  function parseLocalizedNumber(value: any) {
+    let textValue = String(value ?? "")
+      .replace(/[€$£₹]/g, "")
+      .replace(/\s+/g, "")
+      .trim();
+
+    if (!textValue) return null;
+
+    const hasComma = textValue.includes(",");
+    const hasDot = textValue.includes(".");
+
+    if (hasComma && hasDot) {
+      const lastComma = textValue.lastIndexOf(",");
+      const lastDot = textValue.lastIndexOf(".");
+
+      if (lastComma > lastDot) {
+        textValue = textValue.replace(/\./g, "").replace(",", ".");
+      } else {
+        textValue = textValue.replace(/,/g, "");
+      }
+    } else if (hasComma) {
+      const parts = textValue.split(",");
+      const decimalPart = parts[parts.length - 1] || "";
+
+      if (decimalPart.length <= 2) {
+        textValue = `${parts.slice(0, -1).join("")}.${decimalPart}`;
+      } else {
+        textValue = parts.join("");
+      }
     }
-  ],
-  "notes": "",
-  "follow_up_date": ""
-}
 
-Rules:
-- Extract every visible order line.
-- Do not invent quantity or sku.
-- Do not use subject as fake sku.
-
-TEXT:
-${text}
-`;
-
-  const res = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    temperature: 0,
-    response_format: { type: "json_object" },
-    messages: [{ role: "user", content: prompt }],
-  });
-
-  try {
-    return JSON.parse(res.choices[0]?.message?.content || "{}");
-  } catch {
-    return {
-      customer: "",
-      po_number: "",
-      items: [],
-      notes: "",
-      follow_up_date: "",
-    };
+    const result = Number(textValue);
+    return Number.isFinite(result) ? result : null;
   }
+
+  function detectCurrency() {
+    const upper = preserved.toUpperCase();
+
+    if (upper.includes("EUR") || upper.includes("€")) return "EUR";
+    if (upper.includes("GBP") || upper.includes("£")) return "GBP";
+    if (upper.includes("INR") || upper.includes("₹")) return "INR";
+
+    if (
+      upper.includes("USD") ||
+      upper.includes("US$") ||
+      upper.includes("$")
+    ) {
+      return "USD";
+    }
+
+    return "USD";
+  }
+
+  function isPossibleSku(value: string) {
+    const candidate = clean(value)
+      .replace(/^[#:,;]+/, "")
+      .replace(/[,:;]+$/, "")
+      .toUpperCase();
+
+    if (candidate.length < 4) return false;
+    if (!/[A-Z]/.test(candidate)) return false;
+    if (!/\d/.test(candidate)) return false;
+
+    if (["EUR", "USD", "GBP", "INR"].includes(candidate)) {
+      return false;
+    }
+
+    return /^[A-Z0-9][A-Z0-9/._-]*$/.test(candidate);
+  }
+
+  function isBankingLine(line: string) {
+    return (
+      /\b(BANK|BANKING|IBAN|SWIFT|BIC|BBVA|ACCOUNT|A\/C|BANK DETAILS)\b/i.test(
+        line
+      ) ||
+      /\b[A-Z]{2}\d{2}(?:\s+\d{4}){2,}\b/.test(line)
+    );
+  }
+
+  const detectedCurrency = detectCurrency();
+
+  const customer =
+    customerFromPO(preserved) ||
+    labelValue(preserved, [
+      "CUSTOMER",
+      "BUYER",
+      "COMPANY",
+      "BILL TO",
+      "SOLD TO",
+      "CLIENT",
+      "CUSTOMER NAME",
+      "BUYER NAME",
+    ]);
+
+  const poNumber = poFromText(preserved);
+
+  const items: ExtractedItem[] = [];
+  const seen = new Set<string>();
+
+  const addItem = (item: ExtractedItem) => {
+    const sku = clean(
+      item.sku ||
+        item.article ||
+        item.style ||
+        item.item_code ||
+        item.product_code
+    )
+      .replace(/^[#:,;]+/, "")
+      .replace(/[,:;]+$/, "");
+
+    if (!isPossibleSku(sku)) return;
+
+    const quantity = parseLocalizedNumber(item.quantity ?? item.qty);
+    const unitPrice = parseLocalizedNumber(item.unit_price ?? item.price);
+    const suppliedTotal = parseLocalizedNumber(
+      item.line_total ?? item.total_amount
+    );
+
+    const lineTotal =
+      suppliedTotal ??
+      (quantity !== null && unitPrice !== null
+        ? quantity * unitPrice
+        : null);
+
+    const key = [
+      sku.toUpperCase(),
+      quantity ?? "",
+      unitPrice ?? "",
+    ].join("::");
+
+    if (seen.has(key)) return;
+
+    seen.add(key);
+
+    items.push({
+      sku,
+      quantity,
+      unit_price: unitPrice,
+      line_total: lineTotal,
+      currency: currency(item.currency || detectedCurrency),
+      notes: clean(item.notes),
+    });
+  };
+
+  for (const parsedLine of parseStructuredPO(preserved)) {
+    addItem({
+      sku: parsedLine.sku,
+      quantity: parsedLine.quantity,
+      unit_price: parsedLine.unit_price,
+      line_total: parsedLine.total_amount,
+      currency: parsedLine.currency || detectedCurrency,
+      notes: parsedLine.notes,
+    });
+  }
+
+  const nonBankingText = lines
+    .filter((line) => !isBankingLine(line))
+    .join("\n");
+
+  const inlinePatterns = [
+    /\b([A-Z][A-Z0-9/._-]{2,})\s*[-–—:]\s*(\d+(?:[.,]\d+)?)\s*(?:PCS?|PIECES?|MTRS?|METERS?|YDS?|YARDS?|UNITS?)?\s*(?:@|AT)?\s*(?:(USD|EUR|GBP|INR|US\$|\$|€|£|₹)\s*)?(\d+(?:[.,]\d+)?)/gi,
+    /\b([A-Z][A-Z0-9/._-]{2,})\s+(\d+(?:[.,]\d+)?)\s+(?:(USD|EUR|GBP|INR|US\$|\$|€|£|₹)\s*)?(\d+(?:[.,]\d+)?)/gi,
+  ];
+
+  for (const pattern of inlinePatterns) {
+    for (const match of nonBankingText.matchAll(pattern)) {
+      const sku = clean(match[1]);
+      const quantity = parseLocalizedNumber(match[2]);
+      const unitPrice = parseLocalizedNumber(match[4]);
+
+      if (!sku || quantity === null) continue;
+
+      addItem({
+        sku,
+        quantity,
+        unit_price: unitPrice,
+        line_total:
+          unitPrice !== null ? quantity * unitPrice : null,
+        currency: currency(match[3] || detectedCurrency),
+        notes: "",
+      });
+    }
+  }
+
+  for (const line of lines) {
+    if (isBankingLine(line)) continue;
+
+    const rawTokens = line.split(/\s+/).filter(Boolean);
+
+    const numericTokens = rawTokens
+      .map((token, index) => {
+        const cleanedToken = token
+          .replace(/^[€$£₹(]+/, "")
+          .replace(/[€$£₹),:;]+$/, "");
+
+        if (!/^-?\d+(?:[.,]\d+)?$/.test(cleanedToken)) {
+          return null;
+        }
+
+        return {
+          index,
+          value: parseLocalizedNumber(cleanedToken),
+        };
+      })
+      .filter(
+        (
+          token
+        ): token is {
+          index: number;
+          value: number | null;
+        } => token !== null && token.value !== null
+      );
+
+    if (numericTokens.length < 3) continue;
+
+    const quantityToken = numericTokens[numericTokens.length - 3];
+    const unitPriceToken = numericTokens[numericTokens.length - 2];
+    const totalToken = numericTokens[numericTokens.length - 1];
+
+    if (
+      quantityToken.value === null ||
+      unitPriceToken.value === null ||
+      totalToken.value === null
+    ) {
+      continue;
+    }
+
+    const candidateTokens = rawTokens
+      .slice(0, quantityToken.index)
+      .map((token, index) => ({
+        token: token
+          .replace(/^[#(:,;]+/, "")
+          .replace(/[),:;]+$/, ""),
+        index,
+      }))
+      .filter(({ token }) => isPossibleSku(token));
+
+    const skuCandidate = candidateTokens[candidateTokens.length - 1];
+
+    if (!skuCandidate) continue;
+
+    const description = rawTokens
+      .slice(skuCandidate.index + 1, quantityToken.index)
+      .join(" ")
+      .trim();
+
+    addItem({
+      sku: skuCandidate.token,
+      quantity: quantityToken.value,
+      unit_price: unitPriceToken.value,
+      line_total: totalToken.value,
+      currency: detectedCurrency,
+      notes: description,
+    });
+  }
+
+  const notes =
+    labelValue(preserved, [
+      "NOTES",
+      "REMARKS",
+      "COMMENTS",
+      "INSTRUCTIONS",
+      "OBSERVATIONS",
+    ]) || clean(lines.slice(0, 8).join(" | "));
+
+  const followUpDate =
+    labelValue(preserved, [
+      "FOLLOW UP DATE",
+      "FOLLOW-UP DATE",
+      "REQUIRED BY",
+      "DELIVERY DATE",
+      "SHIP DATE",
+      "DATE OF SHIPMENT",
+      "FECHA DE EMBARQUE",
+    ]) || "";
+
+  return {
+    customer,
+    po_number: poNumber,
+    items,
+    notes,
+    follow_up_date: followUpDate,
+  };
 }
 
 function normalizeAiItem(item: ExtractedItem) {
@@ -574,33 +874,37 @@ async function insertAiRows(
   text: string
 ) {
   const poNumber = clean(structured.po_number) || poFromText(text);
-  const extractedCustomer = clean(structured.customer) || customerFromPO(text);
+  const extractedCustomer =
+    clean(structured.customer) || customerFromPO(text);
 
   const customerMatch = await getOrCreateCustomer({
     supabase,
     fromEmail: email.from_email,
     extractedCustomerName: extractedCustomer,
-});
+  });
 
   const customer =
-    customerMatch.customer_name || extractedCustomer || clean(email.from_email);
+    customerMatch.customer_name ||
+    extractedCustomer ||
+    clean(email.from_email);
+
+  const normalizedItems = (structured.items || [])
+    .map(normalizeAiItem)
+    .filter((item) => item.sku);
 
   if (intent === "ORDER") {
-    const items = (structured.items || [])
-      .map(normalizeAiItem)
-      .filter((item) => item.sku);
+  const group = await resolveOrderGroup({
+  supabase,
+  email,
+  customerId: customerMatch.customer_id,
+  customerName: customer,
+  poNumber,
+  orderReference: normalizedItems[0]?.sku || null,
+  source: "email",
+  conversationType: "ORDER",
+});
 
-    const group = await resolveOrderGroup({
-      supabase,
-      email,
-      customerId: customerMatch.customer_id,
-      customerName: customer,
-      poNumber,
-      orderReference: items[0]?.sku || null,
-      source: "email",
-    });
-
-    for (const item of items) {
+    for (const item of normalizedItems) {
       await saveOrderItem({
         email,
         orderGroupId: group.id,
@@ -617,30 +921,127 @@ async function insertAiRows(
       });
     }
 
-    return items.length;
+    return normalizedItems.length;
+  }
+const group = await resolveOrderGroup({
+  supabase,
+  email,
+  customerId: customerMatch.customer_id,
+  customerName: customer,
+  poNumber,
+  orderReference:
+    normalizedItems[0]?.sku ||
+    normalizedItems[0]?.notes ||
+    null,
+  source: "email",
+
+  conversationType:
+    intent === "ENQUIRY"
+      ? "ENQUIRY"
+      : intent === "CANCELLATION"
+      ? "CANCELLATION"
+      : "GENERAL",
+});
+
+  const action =
+    intent === "CANCELLATION"
+      ? "Cancel Order"
+      : "Reply to Enquiry";
+
+function extractBusinessMessage(text: string) {
+  const lines = keepLines(text)
+    .split("\n")
+    .map((line) => clean(line))
+    .filter(Boolean);
+
+  const ignorePatterns = [
+    /\bPURCHASE ORDER\b/i,
+    /\bPO\b/i,
+    /\bPAGE\s+\d+/i,
+    /\bTOTAL\b/i,
+    /\bSUBTOTAL\b/i,
+    /\bPRICE\b/i,
+    /\bAMOUNT\b/i,
+    /\bUNIT PRICE\b/i,
+    /\bIBAN\b/i,
+    /\bSWIFT\b/i,
+    /\bBANK\b/i,
+    /\bACCOUNT\b/i,
+    /\bWWW\./i,
+    /\bHTTP/i,
+    /\bEMAIL:/i,
+    /\bPHONE:/i,
+    /\bFAX:/i,
+  ];
+
+  const useful = lines.filter(
+    (line) => !ignorePatterns.some((pattern) => pattern.test(line))
+  );
+
+  return useful.slice(0, 8).join(" | ");
+}
+
+const baseNotes =
+  clean(structured.notes) ||
+  extractBusinessMessage(text) ||
+  clean(email.subject);
+  const rows =
+    normalizedItems.length > 0
+      ? normalizedItems
+      : [
+          {
+            sku: "",
+            quantity: null,
+            unit_price: null,
+            total_amount: null,
+            currency: "",
+            notes: "",
+          },
+        ];
+
+  for (const item of rows) {
+    const combinedNotes = [item.notes, baseNotes]
+      .map((value) => clean(value))
+      .filter(Boolean)
+      .filter((value, index, values) => values.indexOf(value) === index)
+      .join(" | ");
+
+    const { error } = await supabase.from("order_items").insert({
+      action,
+      customer,
+      customer_id: customerMatch.customer_id,
+      customer_match_method: customerMatch.customer_match_method,
+      customer_match_confidence:
+        customerMatch.customer_match_confidence,
+order_group_id: group.id,
+      po_number: poNumber,
+      sku: item.sku,
+      quantity: item.quantity,
+      unit_price: item.unit_price,
+      total_amount: item.total_amount,
+      currency: item.currency || null,
+      notes: combinedNotes,
+      status: "Pending",
+      source_email: email.from_email || "",
+      parent_email_id: email.id,
+      external_message_id: externalId(email),
+      gmail_message_id: email.gmail_message_id,
+      email_subject: email.subject || "",
+      follow_up_due_at:
+        intent === "ENQUIRY"
+          ? structured.follow_up_date || null
+          : null,
+      created_at: new Date().toISOString(),
+    });
+
+    if (error) {
+      throw new Error(
+        `Failed to save ${action.toLowerCase()}: ${error.message}`
+      );
+    }
   }
 
-  await supabase.from("order_items").insert({
-    action: intent === "CANCELLATION" ? "Cancel Order" : "Reply to Enquiry",
-    customer,
-    customer_id: customerMatch.customer_id,
-    customer_match_method: customerMatch.customer_match_method,
-    customer_match_confidence: customerMatch.customer_match_confidence,
-    po_number: poNumber,
-    sku: "",
-    quantity: null,
-    notes: clean(structured.notes) || clean(email.subject),
-    status: "Pending",
-    source_email: email.from_email || "",
-    parent_email_id: email.id,
-    external_message_id: externalId(email),
-    gmail_message_id: email.gmail_message_id,
-    email_subject: email.subject || "",
-    follow_up_due_at: structured.follow_up_date || null,
-    created_at: new Date().toISOString(),
-  });
-
-  return 1;
+  return rows.length;
 }
 
 async function processEmail(email: EmailRow, force: boolean) {
@@ -667,11 +1068,18 @@ async function processEmail(email: EmailRow, force: boolean) {
     };
   }
 
-  const text = keepLines(`${email.body_text || ""}\n\n${email.attachment_text || ""}`);
+  const text = keepLines(
+    `${email.body_text || ""}\n\n${email.attachment_text || ""}`
+  );
 
   if (hasAttachmentWithoutText(email) && !force) {
     await markEmail(email.id, "needs_ocr");
-    return { id: email.id, skipped: true, reason: "needs_ocr" };
+
+    return {
+      id: email.id,
+      skipped: true,
+      reason: "needs_ocr",
+    };
   }
 
   if (!clean(text) || clean(text).length < 10) {
@@ -681,7 +1089,12 @@ async function processEmail(email: EmailRow, force: boolean) {
       "ignored",
       "No useful email body or attachment text"
     );
-    return { id: email.id, ignored: true };
+
+    return {
+      id: email.id,
+      ignored: true,
+      reason: "no_useful_text",
+    };
   }
 
   if (force) {
@@ -689,9 +1102,13 @@ async function processEmail(email: EmailRow, force: boolean) {
   }
 
   const deterministicLines = parseStructuredPO(text);
-  const poNumber = poFromText(text);
+  const deterministicPoNumber = poFromText(text);
 
-  if (deterministicLines.length > 0 && poNumber && hasOrderSignals(text)) {
+  if (
+    deterministicLines.length > 0 &&
+    deterministicPoNumber &&
+    hasOrderSignals(text)
+  ) {
     const insertedItems = await insertStructuredOrder(
       email,
       text,
@@ -710,75 +1127,110 @@ async function processEmail(email: EmailRow, force: boolean) {
   }
 
   const intent = await classifyEmail(text);
+  const structured = await extractStructured(text);
 
-  if (intent === "IGNORE") {
-    await deleteExistingItems(email);
-    await markEmail(email.id, "ignored", "ignored");
-    return { id: email.id, ignored: true, intent };
+  const normalizedItems = (structured.items || [])
+    .map(normalizeAiItem)
+    .filter((item) => item.sku);
+
+  const validation = validateOrderCandidate({
+    subject: email.subject,
+    text,
+    poNumber: structured.po_number,
+    items: normalizedItems,
+  });
+
+  const enquiryValidation = validateEnquiryCandidate({
+    subject: email.subject,
+    text,
+  });
+
+  const cancellationValidation = validateCancellationCandidate({
+    subject: email.subject,
+    text,
+  });
+
+  const hasValidOrderRows = normalizedItems.some(
+    (item) =>
+      !!item.sku &&
+      item.quantity !== null &&
+      item.quantity > 0
+  );
+
+  const hasStrongOrderEvidence =
+    hasOrderSignals(text) ||
+    !!clean(structured.po_number) ||
+    /\bPURCHASE\s+ORDER\b/i.test(text) ||
+    /\bCONFIRMACION\s+PEDIDO\b/i.test(text) ||
+    /\bBON\s+DE\s+COMMANDE\b/i.test(text);
+
+  let finalIntent = intent;
+
+  if (cancellationValidation.isCancellation) {
+    finalIntent = "CANCELLATION";
+  } else if (hasValidOrderRows && hasStrongOrderEvidence) {
+    finalIntent = "ORDER";
+  } else if (enquiryValidation.isEnquiry) {
+    finalIntent = "ENQUIRY";
+  } else {
+    finalIntent = "IGNORE";
   }
 
-const structured = await extractStructured(text);
+  if (finalIntent === "IGNORE") {
+    await deleteExistingItems(email);
+    await markEmail(email.id, "ignored", "ignored");
 
-const normalizedItems = (structured.items || []).map(normalizeAiItem);
+    return {
+      id: email.id,
+      ignored: true,
+      intent: "IGNORE",
+      validator: validation,
+      enquiryValidator: enquiryValidation,
+      cancellationValidator: cancellationValidation,
+      extractedItems: normalizedItems.length,
+    };
+  }
 
-const validation = validateOrderCandidate({
-  subject: email.subject,
-  text,
-  poNumber: structured.po_number,
-  items: normalizedItems,
-});
-
-const enquiryValidation = validateEnquiryCandidate({
-  subject: email.subject,
-  text,
-});
-
-const cancellationValidation = validateCancellationCandidate({
-  subject: email.subject,
-  text,
-});
-
-let finalIntent = intent;
-
-if (cancellationValidation.isCancellation) {
-  finalIntent = "CANCELLATION";
-}
-
-if (intent === "ORDER" && !validation.isOrder) {
-  finalIntent = enquiryValidation.isEnquiry ? "ENQUIRY" : "IGNORE";
-}
-
-const insertedItems = await insertAiRows(
-  email,
-  finalIntent,
-  structured,
-  text
-);
+  const insertedItems = await insertAiRows(
+    email,
+    finalIntent,
+    structured,
+    text
+  );
 
   if (insertedItems === 0) {
     await markEmail(
       email.id,
       "failed",
-      intent.toLowerCase(),
-      `Intent ${intent} found but no rows inserted`
+      finalIntent.toLowerCase(),
+      `Intent ${finalIntent} found but no rows inserted`
     );
 
-    return { id: email.id, ok: false, intent, insertedItems };
+    return {
+      id: email.id,
+      ok: false,
+      intent: finalIntent,
+      insertedItems,
+      validator: validation,
+    };
   }
 
-await markEmail(
-  email.id,
-  "processed",
-  finalIntent.toLowerCase()
-);
+  await markEmail(
+    email.id,
+    "processed",
+    finalIntent.toLowerCase()
+  );
 
-return {
-  id: email.id,
-  processed: true,
-  intent: finalIntent,
-  validator: validation,
-  insertedItems,
-};
+  return {
+    id: email.id,
+    processed: true,
+    intent: finalIntent,
+    validator: validation,
+    enquiryValidator: enquiryValidation,
+    cancellationValidator: cancellationValidation,
+    insertedItems,
+    extraction: "deterministic_rule_engine",
+  };
 }
 
 export async function GET(req: NextRequest) {

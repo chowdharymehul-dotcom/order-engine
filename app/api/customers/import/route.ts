@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import CloudConvert from "cloudconvert";
+
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -544,48 +544,21 @@ async function convertFileToText(params: {
   fileUrl: string;
   inputFormat: string;
 }) {
-  const apiKey = process.env.CLOUDCONVERT_API_KEY;
+  const response = await fetch(params.fileUrl);
 
-  if (!apiKey) {
-    throw new Error("Missing CLOUDCONVERT_API_KEY");
+  if (!response.ok) {
+    throw new Error(`Failed to download customer file: ${response.status}`);
   }
 
-  const cloudConvert = new CloudConvert(apiKey);
+  const text = await response.text();
 
-  const job = await cloudConvert.jobs.create({
-    tasks: {
-      "import-file": {
-        operation: "import/url",
-        url: params.fileUrl,
-      },
-      "convert-to-text": {
-        operation: "convert",
-        input: "import-file",
-        input_format: params.inputFormat,
-        output_format: "txt",
-      },
-      "export-text": {
-        operation: "export/url",
-        input: "convert-to-text",
-        inline: false,
-        archive_multiple_files: false,
-      },
-    },
-  });
-
-  const completedJob = await cloudConvert.jobs.wait(job.id);
-
-  const exportTask = completedJob.tasks?.find(
-    (task: any) => task.name === "export-text"
-  );
-
-  const textUrl = exportTask?.result?.files?.[0]?.url;
-
-  if (!textUrl) {
-    throw new Error("CloudConvert did not return converted text");
+  if (!text.trim()) {
+    throw new Error(
+      "Customer import currently supports CSV/TXT files only after removing CloudConvert."
+    );
   }
 
-  return downloadText(textUrl);
+  return text;
 }
 
 export async function POST(req: NextRequest) {
