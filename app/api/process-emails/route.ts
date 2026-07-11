@@ -1,6 +1,7 @@
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
+import { validateEmailRelevance } from "@/lib/email-relevance-validator";
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { getOrCreateCustomer } from "@/lib/customerAutoLink";
