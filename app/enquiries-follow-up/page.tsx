@@ -8,6 +8,7 @@ import BulkSelectionControls from "@/components/BulkSelectionControls";
 
 type EnquiryItem = {
   id: string;
+  order_group_id: string | null;
   customer: string | null;
   sku: string | null;
   quantity: number | null;
@@ -37,7 +38,15 @@ type GroupedEnquiry = {
   query: string;
   status: string;
   follow_up_due_at: string | null;
+  has_new_activity: boolean;
+  new_activity_count: number;
   items: EnquiryItem[];
+};
+
+type ActivityGroup = {
+  id: string;
+  has_new_activity: boolean | null;
+  new_activity_count: number | null;
 };
 
 type EnquiriesPageProps = {
@@ -229,7 +238,7 @@ export default async function EnquiriesPage({
   const { data, error } = await supabase
     .from("order_items")
     .select(
-      "id, customer, sku, quantity, notes, status, email_subject, action, follow_up_due_at, external_message_id, gmail_message_id, parent_email_id"
+      "id, order_group_id, customer, sku, quantity, notes, status, email_subject, action, follow_up_due_at, external_message_id, gmail_message_id, parent_email_id"
     )
     .is("deleted_at", null)
     .in("action", ["Reply to Enquiry", "Follow Up", "Confirm Delivery"]);
@@ -246,6 +255,28 @@ export default async function EnquiriesPage({
   }
 
   const items = (data ?? []) as EnquiryItem[];
+
+  const activityGroupIds = Array.from(
+    new Set(
+      items
+        .map((item) => clean(item.order_group_id))
+        .filter((groupId): groupId is string => !!groupId)
+    )
+  );
+
+  const { data: activityGroupRows } =
+    activityGroupIds.length > 0
+      ? await supabase
+          .from("order_groups")
+          .select("id, has_new_activity, new_activity_count")
+          .in("id", activityGroupIds)
+      : { data: [] };
+
+  const activityByGroupId = new Map<string, ActivityGroup>();
+
+  for (const group of (activityGroupRows ?? []) as ActivityGroup[]) {
+    activityByGroupId.set(group.id, group);
+  }
 
   const { data: emailRows } = await supabase
     .from("emails")
@@ -286,6 +317,12 @@ export default async function EnquiriesPage({
         emailByMessageId,
       });
 
+      const activityGroup = groupItems
+        .map((item) => clean(item.order_group_id))
+        .filter(Boolean)
+        .map((groupId) => activityByGroupId.get(groupId))
+        .find((group): group is ActivityGroup => !!group);
+
       return {
         key,
         email_id: email?.id || null,
@@ -300,6 +337,8 @@ export default async function EnquiriesPage({
           "",
         status: getGroupStatus(groupItems),
         follow_up_due_at: getEarliestFollowUp(groupItems),
+        has_new_activity: !!activityGroup?.has_new_activity,
+        new_activity_count: Number(activityGroup?.new_activity_count || 0),
         items: groupItems,
       };
     }
@@ -475,7 +514,14 @@ export default async function EnquiriesPage({
                     : "";
 
                   return (
-                    <tr key={row.key} className="hover:bg-gray-50">
+                    <tr
+                      key={row.key}
+                      className={
+                        row.has_new_activity
+                          ? "bg-yellow-50 hover:bg-yellow-100"
+                          : "hover:bg-gray-50"
+                      }
+                    >
                       <td className="p-3 border">
                         <input
                           type="checkbox"
@@ -489,6 +535,12 @@ export default async function EnquiriesPage({
                         {rowHref ? (
                           <Link href={rowHref} className="block">
                             {formatDateTime(row.received_at)}
+
+                            {row.has_new_activity && (
+                              <div className="text-xs text-yellow-700 font-semibold">
+                                New activity ({row.new_activity_count || 1})
+                              </div>
+                            )}
                           </Link>
                         ) : (
                           formatDateTime(row.received_at)

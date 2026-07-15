@@ -1,7 +1,7 @@
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-import { isRelevantBusinessEmail } from "@/lib/email-relevance";
+import { validateEmailRelevance } from "@/lib/email-relevance-validator";
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { getOrCreateCustomer } from "@/lib/customerAutoLink";
@@ -1100,30 +1100,6 @@ async function processEmail(email: EmailRow, force: boolean) {
 
   if (force) {
     await deleteExistingItems(email);
-  }
-
-  const relevance = isRelevantBusinessEmail({
-    subject: email.subject,
-    fromEmail: email.from_email,
-    bodyText: text,
-  });
-
-  if (!relevance.relevant) {
-    await deleteExistingItems(email);
-
-    await markEmail(
-      email.id,
-      "ignored",
-      "ignored",
-      `Irrelevant inbound email: ${relevance.reason}`
-    );
-
-    return {
-      id: email.id,
-      ignored: true,
-      reason: "irrelevant_inbound_email",
-      relevance,
-    };
   }
 
   const deterministicLines = parseStructuredPO(text);

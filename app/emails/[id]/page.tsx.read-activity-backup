@@ -31,7 +31,6 @@ type EmailRecord = {
 
 type OrderItem = {
   id: string;
-  order_group_id: string | null;
   action: string | null;
   customer: string | null;
   po_number: string | null;
@@ -280,7 +279,7 @@ if (typedEmail.external_message_id) {
   const { data } = await supabaseAdmin
     .from("order_items")
     .select(
-  "id, order_group_id, action, customer, po_number, sku, quantity, unit_price, total_amount, currency, notes, status, oc_pdf_url, oc_document_id"
+  "id, action, customer, po_number, sku, quantity, unit_price, total_amount, currency, notes, status, oc_pdf_url, oc_document_id"
 )
 .is("deleted_at", null)
     .eq("external_message_id", typedEmail.external_message_id);
@@ -292,7 +291,7 @@ if (orderItems.length === 0 && typedEmail.gmail_message_id) {
   const { data } = await supabaseAdmin
     .from("order_items")
     .select(
-  "id, order_group_id, action, customer, po_number, sku, quantity, unit_price, total_amount, currency, notes, status, oc_pdf_url, oc_document_id"
+  "id, action, customer, po_number, sku, quantity, unit_price, total_amount, currency, notes, status, oc_pdf_url, oc_document_id"
 )
 .is("deleted_at", null)
     .eq("gmail_message_id", typedEmail.gmail_message_id);
@@ -304,7 +303,7 @@ if (orderItems.length === 0 && typedEmail.subject) {
   const { data } = await supabaseAdmin
     .from("order_items")
     .select(
-  "id, order_group_id, action, customer, po_number, sku, quantity, unit_price, total_amount, currency, notes, status, oc_pdf_url, oc_document_id"
+  "id, action, customer, po_number, sku, quantity, unit_price, total_amount, currency, notes, status, oc_pdf_url, oc_document_id"
 )
 .is("deleted_at", null)
     .eq("email_subject", typedEmail.subject);
@@ -313,32 +312,6 @@ if (orderItems.length === 0 && typedEmail.subject) {
 }
 
   const items = (orderItems ?? []) as OrderItem[];
-
-  const activityGroupIds = Array.from(
-    new Set(
-      items
-        .map((item) => clean(item.order_group_id))
-        .filter((groupId): groupId is string => !!groupId)
-    )
-  );
-
-  if (activityGroupIds.length > 0) {
-    const { error: activityUpdateError } = await supabaseAdmin
-      .from("order_groups")
-      .update({
-        has_new_activity: false,
-        new_activity_count: 0,
-      })
-      .in("id", activityGroupIds);
-
-    if (activityUpdateError) {
-      console.error(
-        "Failed to mark conversation activity as read:",
-        activityUpdateError.message
-      );
-    }
-  }
-
   const orderLines = orderItemsOnly(items);
 const { data: sellerRows } = await supabaseAdmin
   .from("seller_profiles")
