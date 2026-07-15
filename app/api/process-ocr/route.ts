@@ -201,81 +201,23 @@ async function extractTextFromAttachment(params: {
 }) {
   const { attachmentUrl, filename, contentType, buffer } = params;
 if (looksLikePdf(buffer)) {
-  const pdfjsLib = await runtimeImport(
-    "pdfjs-dist/legacy/build/pdf.mjs"
+  const {
+    extractTextFromPdfWithCloudConvert,
+  } = await import("@/lib/cloudconvert-ocr");
+
+  const result = await extractTextFromPdfWithCloudConvert(
+    buffer,
+    filename
   );
 
-  const tesseract = await runtimeImport("tesseract.js");
-  const recognize =
-    tesseract.recognize || tesseract.default?.recognize;
-
-  if (!recognize) {
-    throw new Error("Tesseract recognize function not found");
-  }
-
-  const pdf = await pdfjsLib.getDocument({
-    data: new Uint8Array(buffer),
-    isEvalSupported: false,
-    useSystemFonts: true,
-  } as any).promise;
-
-  try {
-    const pageCount = Math.min(
-      Number(pdf.numPages || 0),
-      MAX_SCANNED_PDF_PAGES
-    );
-
-    const pageTexts: string[] = [];
-
-    for (
-      let pageNumber = 1;
-      pageNumber <= pageCount;
-      pageNumber += 1
-    ) {
-      const imageBuffer = await renderPdfPageToPng({
-        pdf,
-        pageNumber,
-        scale: OCR_SCALE,
-      });
-
-      const ocrResult = await recognize(imageBuffer, "eng");
-      const pageText = cleanOcrText(
-        ocrResult?.data?.text || ""
-      );
-
-      if (pageText) {
-        pageTexts.push(pageText);
-      }
-    }
-
-    const scannedText = cleanOcrText(
-      pageTexts.join("\n\n")
-    );
-
-    if (scannedText.length < MIN_USEFUL_TEXT_LENGTH) {
-      throw new Error(
-        JSON.stringify({
-          step: "local_scanned_pdf_ocr",
-          error:
-            "Scanned PDF OCR returned empty/too-short text",
-          filename,
-          ocrTextLength: scannedText.length,
-          ocrPreview: scannedText.slice(0, 300),
-        })
-      );
-    }
-
-    return {
-      text: scannedText,
-      method: "local_scanned_pdf_tesseract",
-      jobId: `local-scanned-pdf-${Date.now()}`,
-      strategy: "pdfjs_canvas_tesseract",
-      directTextLength: 0,
-      ocrTextLength: scannedText.length,
-    } satisfies OcrResult;
-  } finally {
-    await (pdf as any).destroy?.();
-  }
+  return {
+    text: result.text,
+    method: "local_pdf_pipeline",
+    jobId: result.jobId,
+    strategy: result.strategy,
+    directTextLength: result.directTextLength,
+    ocrTextLength: result.ocrTextLength,
+  };
 }
 
   if (isTextLike(filename, contentType)) {
