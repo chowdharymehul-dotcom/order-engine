@@ -84,37 +84,6 @@ function getWebsiteDomain(website: string | null | undefined) {
     .trim();
 }
 
-const SHARED_EMAIL_DOMAINS = new Set([
-  "gmail.com",
-  "googlemail.com",
-  "yahoo.com",
-  "yahoo.co.in",
-  "yahoo.co.uk",
-  "hotmail.com",
-  "outlook.com",
-  "live.com",
-  "msn.com",
-  "icloud.com",
-  "me.com",
-  "mac.com",
-  "aol.com",
-  "proton.me",
-  "protonmail.com",
-  "gmx.com",
-  "gmx.net",
-  "mail.com",
-  "zoho.com",
-  "rediffmail.com",
-  "yandex.com",
-  "qq.com",
-  "163.com",
-  "126.com",
-]);
-
-function isSharedEmailDomain(domain: string | null | undefined) {
-  return SHARED_EMAIL_DOMAINS.has(normalize(domain));
-}
-
 function websiteFromDomain(domain: string | null | undefined) {
   const cleanDomain = normalize(domain).replace(/^www\./, "").trim();
 
@@ -264,17 +233,15 @@ async function findExistingCustomer(params: {
     if (match) return resultFromCompany(match, "exact_email", 100);
   }
 
-  if (senderDomain && !isSharedEmailDomain(senderDomain)) {
-    const domainMatches = customers.filter((customer) => {
+  if (senderDomain) {
+    const match = customers.find((customer) => {
       return (
         getEmailDomain(customer.email) === senderDomain ||
         getWebsiteDomain(customer.website) === senderDomain
       );
     });
 
-    if (domainMatches.length === 1) {
-      return resultFromCompany(domainMatches[0], "unique_business_domain", 95);
-    }
+    if (match) return resultFromCompany(match, "domain", 95);
   }
 
   if (extractedName) {
