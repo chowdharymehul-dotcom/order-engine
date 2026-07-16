@@ -422,8 +422,7 @@ async function insertStructuredOrder(
     supabase,
     fromEmail: email.from_email,
     extractedCustomerName: extractedCustomer,
-    subject: email.subject,
-  });
+});
 
   const customer =
     customerMatch.customer_name || extractedCustomer || clean(email.from_email);
@@ -1022,7 +1021,6 @@ async function insertAiRows(
     supabase,
     fromEmail: email.from_email,
     extractedCustomerName: extractedCustomer,
-    subject: email.subject,
   });
 
   const customer =

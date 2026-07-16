@@ -115,64 +115,6 @@ function isSharedEmailDomain(domain: string | null | undefined) {
   return SHARED_EMAIL_DOMAINS.has(normalize(domain));
 }
 
-function providerNameFromDomain(domain: string | null | undefined) {
-  const value = normalize(domain);
-
-  if (!value) return "";
-
-  return cleanText(value.split(".")[0] || "");
-}
-
-function isProviderPlaceholderName(
-  companyName: string | null | undefined,
-  domain: string | null | undefined
-) {
-  if (!isSharedEmailDomain(domain)) return false;
-
-  const company = cleanCompanyName(companyName);
-  const provider = cleanCompanyName(providerNameFromDomain(domain));
-
-  return !!company && !!provider && company === provider;
-}
-
-function companyNameFromSubject(value: string | null | undefined) {
-  let subject = cleanText(value)
-    .replace(/^(?:re|fw|fwd)\s*:\s*/gi, "")
-    .replace(/\s*\|\s*pinx\s*$/i, "")
-    .trim();
-
-  if (!subject) return "";
-
-  const genericSubjects = [
-    "order inquiry",
-    "inquiry",
-    "enquiry",
-    "purchase order",
-    "new order",
-    "request",
-    "question",
-    "follow up",
-    "follow-up",
-    "documentation",
-  ];
-
-  if (genericSubjects.includes(normalize(subject))) {
-    return "";
-  }
-
-  if (
-    /\b(?:invoice|shipment|air waybill|tracking|newsletter|conference|webinar)\b/i.test(
-      subject
-    )
-  ) {
-    return "";
-  }
-
-  if (subject.length < 3 || subject.length > 100) return "";
-
-  return subject;
-}
-
 function websiteFromDomain(domain: string | null | undefined) {
   const cleanDomain = normalize(domain).replace(/^www\./, "").trim();
 
@@ -271,31 +213,15 @@ function fallbackResult(extractedCustomerName?: string | null): CustomerMatchRes
 function chooseCustomerName(params: {
   extractedCustomerName?: string | null;
   fromEmail?: string | null;
-  subject?: string | null;
 }) {
   const extracted = cleanText(params.extractedCustomerName);
 
   if (extracted && !extracted.includes("@")) return extracted;
 
-  const subjectCompany = companyNameFromSubject(params.subject);
-
-  if (subjectCompany) {
-    return subjectCompany;
-  }
-
-  const senderDomain = getEmailDomain(params.fromEmail);
-  const emailName = nameFromEmail(params.fromEmail);
-
-  if (isSharedEmailDomain(senderDomain)) {
-    if (emailName) return titleCase(emailName);
-
-    const email = extractEmailAddress(params.fromEmail);
-    return email || "";
-  }
-
   const domainName = nameFromDomain(params.fromEmail);
   if (domainName) return titleCase(domainName);
 
+  const emailName = nameFromEmail(params.fromEmail);
   if (emailName) return titleCase(emailName);
 
   const email = extractEmailAddress(params.fromEmail);
@@ -321,7 +247,6 @@ async function findExistingCustomer(params: {
   supabase: SupabaseClient;
   fromEmail?: string | null;
   extractedCustomerName?: string | null;
-  subject?: string | null;
 }): Promise<CustomerMatchResult> {
   const { supabase, fromEmail, extractedCustomerName } = params;
 
@@ -333,9 +258,7 @@ async function findExistingCustomer(params: {
 
   if (senderEmail) {
     const match = customers.find(
-      (customer) =>
-        extractEmailAddress(customer.email) === senderEmail &&
-        !isProviderPlaceholderName(customer.company_name, senderDomain)
+      (customer) => extractEmailAddress(customer.email) === senderEmail
     );
 
     if (match) return resultFromCompany(match, "exact_email", 100);
@@ -407,16 +330,14 @@ async function createCustomer(params: {
   supabase: SupabaseClient;
   fromEmail?: string | null;
   extractedCustomerName?: string | null;
-  subject?: string | null;
 }) {
-  const { supabase, fromEmail, extractedCustomerName, subject } = params;
+  const { supabase, fromEmail, extractedCustomerName } = params;
 
   const senderEmail = extractEmailAddress(fromEmail);
   const senderDomain = getEmailDomain(fromEmail);
   const companyName = chooseCustomerName({
     extractedCustomerName,
     fromEmail,
-    subject,
   });
 
   if (!companyName) return fallbackResult(extractedCustomerName);
@@ -431,47 +352,6 @@ async function createCustomer(params: {
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
   };
-
-  if (senderEmail && isSharedEmailDomain(senderDomain)) {
-    const { data: placeholderCustomer } = await supabase
-      .from("company_profiles")
-      .select("id,company_name,email,website,contact_person,is_active")
-      .eq("email", senderEmail)
-      .eq("is_active", true)
-      .maybeSingle();
-
-    if (
-      placeholderCustomer &&
-      isProviderPlaceholderName(
-        placeholderCustomer.company_name,
-        senderDomain
-      )
-    ) {
-      const { data: updatedCustomer, error: updateError } = await supabase
-        .from("company_profiles")
-        .update({
-          company_name: companyName,
-          website,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", placeholderCustomer.id)
-        .select("id,company_name,email,website,contact_person,is_active")
-        .single();
-
-      if (updateError) {
-        throw new Error(
-          `Failed to repair placeholder customer: ${updateError.message}`
-        );
-      }
-
-      return resultFromCompany(
-        updatedCustomer as CompanyProfile,
-        "repaired_placeholder",
-        85,
-        false
-      );
-    }
-  }
 
   const { data: createdCustomer, error: createError } = await supabase
     .from("company_profiles")
@@ -513,22 +393,14 @@ export async function getOrCreateCustomer(params: {
   supabase: SupabaseClient;
   fromEmail?: string | null;
   extractedCustomerName?: string | null;
-  subject?: string | null;
   allowCreate?: boolean;
 }) {
-  const {
-    supabase,
-    fromEmail,
-    extractedCustomerName,
-    subject,
-    allowCreate = true,
-  } = params;
+  const { supabase, fromEmail, extractedCustomerName, allowCreate = true } = params;
 
   const existingCustomer = await findExistingCustomer({
     supabase,
     fromEmail,
     extractedCustomerName,
-    subject,
   });
 
   if (existingCustomer.customer_id || !allowCreate) {
@@ -539,7 +411,6 @@ export async function getOrCreateCustomer(params: {
     supabase,
     fromEmail,
     extractedCustomerName,
-    subject,
   });
 }
 
