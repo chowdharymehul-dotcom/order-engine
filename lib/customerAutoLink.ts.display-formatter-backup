@@ -181,170 +181,6 @@ function websiteFromDomain(domain: string | null | undefined) {
   return cleanDomain;
 }
 
-const MAILBOX_BUSINESS_WORDS = [
-  "international",
-  "collections",
-  "collection",
-  "trimmings",
-  "trimming",
-  "creative",
-  "creatives",
-  "designers",
-  "designer",
-  "designs",
-  "design",
-  "fashion",
-  "fashions",
-  "textiles",
-  "textile",
-  "bridal",
-  "couture",
-  "studio",
-  "studios",
-  "apparel",
-  "garments",
-  "garment",
-  "clothing",
-  "clothes",
-  "fabric",
-  "fabrics",
-  "accessories",
-  "accessory",
-  "production",
-  "productions",
-  "sourcing",
-  "exports",
-  "export",
-  "imports",
-  "import",
-  "trading",
-  "trade",
-  "group",
-  "house",
-  "company",
-  "corporation",
-  "enterprises",
-  "enterprise",
-  "industries",
-  "industry",
-  "east",
-  "west",
-  "north",
-  "south",
-  "coast",
-  "new",
-  "york",
-  "los",
-  "angeles",
-  "the",
-  "and",
-];
-
-const MAILBOX_DISPLAY_ACRONYMS = new Set([
-  "lm",
-  "ny",
-  "nyc",
-  "la",
-  "usa",
-  "uk",
-  "eu",
-]);
-
-function splitMailboxWord(value: string) {
-  const input = normalize(value).replace(/[^a-z]/g, "");
-
-  if (!input) return [];
-
-  const words = [...MAILBOX_BUSINESS_WORDS].sort(
-    (left, right) => right.length - left.length
-  );
-
-  const memo = new Map<number, string[] | null>();
-
-  function solve(index: number): string[] | null {
-    if (index === input.length) return [];
-
-    if (memo.has(index)) {
-      return memo.get(index) || null;
-    }
-
-    for (const word of words) {
-      if (!input.startsWith(word, index)) continue;
-
-      const remaining = solve(index + word.length);
-
-      if (remaining) {
-        const result = [word, ...remaining];
-        memo.set(index, result);
-        return result;
-      }
-    }
-
-    /*
-     * Preserve a short prefix as a possible company acronym,
-     * such as LM Creative.
-     */
-    for (let length = 2; length <= 3; length += 1) {
-      const prefix = input.slice(index, index + length);
-
-      if (!MAILBOX_DISPLAY_ACRONYMS.has(prefix)) continue;
-
-      const remaining = solve(index + length);
-
-      if (remaining) {
-        const result = [prefix, ...remaining];
-        memo.set(index, result);
-        return result;
-      }
-    }
-
-    memo.set(index, null);
-    return null;
-  }
-
-  return solve(0) || [];
-}
-
-function formatMailboxDisplayName(value: string | null | undefined) {
-  const cleaned = cleanText(value)
-    .replace(/\d+/g, " ")
-    .replace(/[._-]+/g, " ")
-    .replace(/([a-z])([A-Z])/g, "$1 $2")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  if (!cleaned) return "";
-
-  const visibleParts = cleaned.split(" ").filter(Boolean);
-  const formattedParts: string[] = [];
-
-  for (const part of visibleParts) {
-    const segmented = splitMailboxWord(part);
-
-    if (segmented.length > 1) {
-      formattedParts.push(...segmented);
-    } else {
-      formattedParts.push(part);
-    }
-  }
-
-  return formattedParts
-    .map((word) => {
-      const normalizedWord = normalize(word);
-
-      if (MAILBOX_DISPLAY_ACRONYMS.has(normalizedWord)) {
-        return normalizedWord.toUpperCase();
-      }
-
-      return (
-        normalizedWord.charAt(0).toUpperCase() +
-        normalizedWord.slice(1)
-      );
-    })
-    .join(" ")
-    .trim();
-}
-
 function nameFromEmail(value: string | null | undefined) {
   const email = extractEmailAddress(value);
 
@@ -352,7 +188,12 @@ function nameFromEmail(value: string | null | undefined) {
 
   const localPart = email.split("@")[0] || "";
 
-  return formatMailboxDisplayName(localPart);
+  return cleanText(
+    localPart
+      .replace(/[._-]+/g, " ")
+      .replace(/\d+/g, " ")
+      .replace(/\s+/g, " ")
+  );
 }
 
 function nameFromDomain(value: string | null | undefined) {
