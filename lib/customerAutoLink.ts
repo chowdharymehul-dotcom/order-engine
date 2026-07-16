@@ -270,11 +270,7 @@ async function findExistingCustomer(params: {
 
       if (!alias) return false;
 
-      return (
-        alias === extractedName ||
-        alias.includes(extractedName) ||
-        extractedName.includes(alias)
-      );
+     return alias === extractedName;
     });
 
     const company = aliasMatch ? companyFromAliasRow(aliasMatch) : null;
@@ -288,11 +284,7 @@ async function findExistingCustomer(params: {
 
       if (!company) return false;
 
-      return (
-        company === extractedName ||
-        company.includes(extractedName) ||
-        extractedName.includes(company)
-      );
+      return company === extractedName;
     });
 
     if (match) return resultFromCompany(match, "company_name", 80);
