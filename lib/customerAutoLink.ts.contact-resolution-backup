@@ -317,61 +317,6 @@ async function loadCompanyProfiles(supabase: SupabaseClient) {
   return (data || []) as CompanyProfile[];
 }
 
-async function findCustomerByContactEmail(params: {
-  supabase: SupabaseClient;
-  senderEmail: string;
-  senderDomain: string;
-}): Promise<CustomerMatchResult | null> {
-  const { supabase, senderEmail, senderDomain } = params;
-
-  if (!senderEmail) return null;
-
-  const { data: contact, error: contactError } = await supabase
-    .from("customer_contacts")
-    .select("customer_id")
-    .ilike("email", senderEmail)
-    .eq("is_active", true)
-    .maybeSingle();
-
-  if (contactError) {
-    throw new Error(
-      `Failed to search customer contacts: ${contactError.message}`
-    );
-  }
-
-  if (!contact?.customer_id) return null;
-
-  const { data: company, error: companyError } = await supabase
-    .from("company_profiles")
-    .select("id,company_name,email,website,contact_person,is_active")
-    .eq("id", contact.customer_id)
-    .eq("is_active", true)
-    .maybeSingle();
-
-  if (companyError) {
-    throw new Error(
-      `Failed to load contact customer: ${companyError.message}`
-    );
-  }
-
-  if (!company) return null;
-
-  /*
-   * Ignore old records that were accidentally created with provider names
-   * such as Gmail, Yahoo or Hotmail. They will be repaired later by the
-   * normal customer-creation flow.
-   */
-  if (isProviderPlaceholderName(company.company_name, senderDomain)) {
-    return null;
-  }
-
-  return resultFromCompany(
-    company as CompanyProfile,
-    "exact_contact_email",
-    100
-  );
-}
-
 async function findExistingCustomer(params: {
   supabase: SupabaseClient;
   fromEmail?: string | null;
@@ -387,23 +332,13 @@ async function findExistingCustomer(params: {
   const customers = await loadCompanyProfiles(supabase);
 
   if (senderEmail) {
-    const contactMatch = await findCustomerByContactEmail({
-      supabase,
-      senderEmail,
-      senderDomain,
-    });
-
-    if (contactMatch) return contactMatch;
-
     const match = customers.find(
       (customer) =>
         extractEmailAddress(customer.email) === senderEmail &&
         !isProviderPlaceholderName(customer.company_name, senderDomain)
     );
 
-    if (match) {
-      return resultFromCompany(match, "exact_company_email", 100);
-    }
+    if (match) return resultFromCompany(match, "exact_email", 100);
   }
 
   if (senderDomain && !isSharedEmailDomain(senderDomain)) {
@@ -546,35 +481,6 @@ async function createCustomer(params: {
 
   if (createError) {
     throw new Error(`Failed to auto-create customer: ${createError.message}`);
-  }
-
-  if (createdCustomer?.id && senderEmail) {
-    const { error: contactInsertError } = await supabase
-      .from("customer_contacts")
-      .insert({
-        customer_id: createdCustomer.id,
-        contact_name: null,
-        email: senderEmail,
-        phone: null,
-        job_title: null,
-        is_primary: true,
-        is_active: true,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      });
-
-    /*
-     * A duplicate means the email was already stored as a contact.
-     * Do not fail customer creation solely because of that.
-     */
-    if (
-      contactInsertError &&
-      contactInsertError.code !== "23505"
-    ) {
-      throw new Error(
-        `Failed to save customer contact: ${contactInsertError.message}`
-      );
-    }
   }
 
   const extractedName = cleanText(extractedCustomerName);
