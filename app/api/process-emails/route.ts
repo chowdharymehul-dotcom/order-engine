@@ -783,8 +783,10 @@ async function extractStructured(text: string): Promise<ExtractedData> {
     let description = clean(match[2]);
 
     // Remove a repeated SKU commonly produced by collapsed PDF columns.
+    const escapedSku = sku.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&");
+
     const repeatedSkuPattern = new RegExp(
-      `\\b${sku.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}\\b`,
+      escapedSku,
       "gi"
     );
 
