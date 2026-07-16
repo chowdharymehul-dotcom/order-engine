@@ -623,7 +623,7 @@ async function extractStructured(text: string): Promise<ExtractedData> {
       .replace(/[,:;]+$/, "")
       .toUpperCase();
 
-    if (candidate.length < 4 || candidate.length > 60) return false;
+    if (candidate.length < 4) return false;
     if (!/[A-Z]/.test(candidate)) return false;
     if (!/\d/.test(candidate)) return false;
 
@@ -631,42 +631,7 @@ async function extractStructured(text: string): Promise<ExtractedData> {
       return false;
     }
 
-    if (!/^[A-Z0-9][A-Z0-9/._-]*$/.test(candidate)) {
-      return false;
-    }
-
-    // Reject telephone and contact-number patterns.
-    if (
-      /(?:^|[-_.])(TEL|TELEPHONE|PHONE|MOBILE|CELL|FAX|EXT)(?:$|[-_.])/i.test(
-        candidate
-      )
-    ) {
-      return false;
-    }
-
-    if (/^\d{2,4}(?:[-./]\d{2,4}){2,}(?:[-./][A-Z]+)?$/i.test(candidate)) {
-      return false;
-    }
-
-    if (/^\+?\d[\d()._-]{6,}$/i.test(candidate)) {
-      return false;
-    }
-
-    // Reject common date formats.
-    if (
-      /^\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}$/i.test(candidate) ||
-      /^\d{8}$/i.test(candidate)
-    ) {
-      return false;
-    }
-
-    // Reject IBAN-style prefixes and obvious address/postal tokens.
-    if (/^[A-Z]{2}\d{2}$/.test(candidate)) return false;
-    if (/^(ZIP|POSTAL|PIN|STREET|ROAD|AVENUE|SUITE|FLOOR)\d*$/i.test(candidate)) {
-      return false;
-    }
-
-    return true;
+    return /^[A-Z0-9][A-Z0-9/._-]*$/.test(candidate);
   }
 
   function isBankingLine(line: string) {
@@ -758,57 +723,6 @@ async function extractStructured(text: string): Promise<ExtractedData> {
     .filter((line) => !isBankingLine(line))
     .join("\n");
 
-  /*
-   * Generic compact purchase-order parser.
-   *
-   * Handles digitally extracted PDF rows where columns may collapse:
-   *
-   * 1. SKU123 - DESCRIPTION
-   * UOM: YARD
-   * 58$12.50$725.00
-   *
-   * No customer, document, SKU or PO-specific values are used here.
-   */
-  const compactPoPattern =
-    /(?:^|\n)\s*\d+\s*[.)]\s*([A-Z][A-Z0-9/._-]{2,})\s*[-–—:]\s*([\s\S]*?)\s+(\d+(?:[.,]\d+)?)\s*([€$£₹])\s*(\d+(?:[.,]\d+)?)\s*\4\s*(\d+(?:[.,]\d+)?)(?=\s*(?:\n\s*\d+\s*[.)]|\n\s*TOTAL\b|$))/gim;
-
-  for (const match of nonBankingText.matchAll(compactPoPattern)) {
-    const sku = clean(match[1]);
-    const quantity = parseLocalizedNumber(match[3]);
-    const unitPrice = parseLocalizedNumber(match[5]);
-    const lineTotal = parseLocalizedNumber(match[6]);
-
-    if (!sku || quantity === null) continue;
-
-    let description = clean(match[2]);
-
-    // Remove a repeated SKU commonly produced by collapsed PDF columns.
-    const repeatedSkuPattern = new RegExp(
-      `\\b${sku.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}\\b`,
-      "gi"
-    );
-
-    description = description
-      .replace(repeatedSkuPattern, " ")
-      .replace(/\bUOM\s*:\s*[A-Z]+\b/gi, " ")
-      .replace(/\bDRY\s+CLEAN\s+ONLY\b/gi, "DRY CLEAN ONLY")
-      .replace(/\s+/g, " ")
-      .trim();
-
-    addItem({
-      sku,
-      quantity,
-      unit_price: unitPrice,
-      line_total:
-        lineTotal ??
-        (quantity !== null && unitPrice !== null
-          ? quantity * unitPrice
-          : null),
-      currency: currency(match[4] || detectedCurrency),
-      notes: description,
-    });
-  }
-
   const inlinePatterns = [
     /\b([A-Z][A-Z0-9/._-]{2,})\s*[-–—:]\s*(\d+(?:[.,]\d+)?)\s*(?:PCS?|PIECES?|MTRS?|METERS?|YDS?|YARDS?|UNITS?)?\s*(?:@|AT)?\s*(?:(USD|EUR|GBP|INR|US\$|\$|€|£|₹)\s*)?(\d+(?:[.,]\d+)?)/gi,
     /\b([A-Z][A-Z0-9/._-]{2,})\s+(\d+(?:[.,]\d+)?)\s+(?:(USD|EUR|GBP|INR|US\$|\$|€|£|₹)\s*)?(\d+(?:[.,]\d+)?)/gi,
@@ -836,18 +750,6 @@ async function extractStructured(text: string): Promise<ExtractedData> {
 
   for (const line of lines) {
     if (isBankingLine(line)) continue;
-
-    if (
-      /\b(?:FROM|TO|CC|BCC|SUBJECT|DATE|SENT|BEGIN FORWARDED MESSAGE)\s*:/i.test(
-        line
-      ) ||
-      /\b(?:PHONE|TELEPHONE|MOBILE|CELL|FAX|E-?MAIL|EMAIL)\b/i.test(line) ||
-      /\b(?:STREET|ROAD|AVENUE|BOULEVARD|SUITE|FLOOR|LOS ANGELES|KOLKATA|INDIA|UNITED STATES)\b/i.test(
-        line
-      )
-    ) {
-      continue;
-    }
 
     const rawTokens = line.split(/\s+/).filter(Boolean);
 
