@@ -795,45 +795,6 @@ async function extractStructured(text: string): Promise<ExtractedData> {
       .replace(/\s+/g, " ")
       .trim();
 
-    const descriptionParts = description
-      .split(/\s+-\s+/)
-      .map((part) => clean(part))
-      .filter(Boolean);
-
-    if (descriptionParts.length > 1) {
-      const uniqueParts: string[] = [];
-
-      for (const part of descriptionParts) {
-        const normalizedPart = part.toUpperCase();
-
-        if (
-          !uniqueParts.some(
-            (existing) =>
-              existing.toUpperCase() === normalizedPart ||
-              existing.toUpperCase().includes(normalizedPart) ||
-              normalizedPart.includes(existing.toUpperCase())
-          )
-        ) {
-          uniqueParts.push(part);
-        }
-      }
-
-      description = uniqueParts.join(" - ");
-    }
-
-    const words = description.split(/\s+/).filter(Boolean);
-    const deduplicatedWords: string[] = [];
-
-    for (const word of words) {
-      const previous = deduplicatedWords[deduplicatedWords.length - 1];
-
-      if (!previous || previous.toUpperCase() !== word.toUpperCase()) {
-        deduplicatedWords.push(word);
-      }
-    }
-
-    description = deduplicatedWords.join(" ").trim();
-
     addItem({
       sku,
       quantity,
